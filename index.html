@@ -1673,6 +1673,82 @@ Message: ${d.message}`),className:"mt-4 text-[11px] card-white px-4 py-2 rounded
 <!-- FIX END -->
 
 
+
+<!-- FINAL VIDEO FIX V3 - LocalStorage Quota + Chunked Firestore - NO DESIGN CHANGE -->
+<script>
+// Global caches
+window.alamgirVideoCache = window.alamgirVideoCache || {};
+window._pendingVideoChunks = window._pendingVideoChunks || {};
+
+(function(){
+  const origSetItem = localStorage.setItem.bind(localStorage);
+  localStorage.setItem = function(key, value){
+    if(key === 'alamgir_products' && value && value.length > 500000){
+      try{
+        let arr;
+        try{ arr = JSON.parse(value); }catch(e){ return origSetItem(key, value); }
+        if(!Array.isArray(arr)) return origSetItem(key, value);
+        let hasLargeVideo = false;
+        let newArr = [];
+        for(let p of arr){
+          if(p && p.img && typeof p.img === 'string' && p.img.startsWith('data:video') && p.img.length > 800000){
+            hasLargeVideo = true;
+            const id = p.id || ('p_'+Date.now()+'_'+Math.random().toString(36).slice(2));
+            p.id = id;
+            const dataUrl = p.img;
+            const chunkSize = 750000;
+            const chunks = [];
+            for(let i=0;i<dataUrl.length;i+=chunkSize) chunks.push(dataUrl.slice(i,i+chunkSize));
+            window._pendingVideoChunks[id] = chunks;
+            window.alamgirVideoCache[id] = dataUrl;
+            console.log('📦 Large video detected, chunking', id, 'into', chunks.length, 'parts, original size', dataUrl.length);
+            newArr.push({...p, img: 'CHUNKED_VIDEO:'+id, _chunkCount: chunks.length, _isChunked: true});
+          } else if(p && p.img && typeof p.img === 'string' && p.img.startsWith('data:video') && p.img.length > 100000){
+            // medium video, keep but also cache
+            const id = p.id;
+            if(id) window.alamgirVideoCache[id] = p.img;
+            newArr.push(p);
+          } else {
+            newArr.push(p);
+          }
+        }
+        if(hasLargeVideo){
+          const smallJson = JSON.stringify(newArr);
+          console.log('✅ Saved chunked version to localStorage, size', smallJson.length, 'vs original', value.length);
+          return origSetItem(key, smallJson);
+        }
+      }catch(e){
+        console.log('localStorage chunk handling error', e);
+      }
+    }
+    try{
+      return origSetItem(key, value);
+    }catch(e){
+      if(e.name === 'QuotaExceededError' || e.code === 22 || e.message.includes('quota')){
+        console.warn('❌ QuotaExceededError, trying to save reduced version');
+        try{
+          let arr = JSON.parse(value);
+          if(Array.isArray(arr)){
+            // remove oldest large media to fit
+            let reduced = arr.map(p=>{
+              if(p.img && p.img.length > 200000){
+                return {...p, img: p.img.substring(0,50000)+'...'};
+              }
+              return p;
+            });
+            return origSetItem(key, JSON.stringify(reduced));
+          }
+        }catch(err){}
+        alert('Storage full! Please delete some old posts with videos. Browser limit reached.');
+      }
+      throw e;
+    }
+  };
+  console.log('✅ LocalStorage quota patch applied');
+})();
+</script>
+<!-- FINAL FIX V3 PART 1 END -->
+
 <!-- FIREBASE LIVE SYNC - FIXED NO RELOAD + VIDEO CHUNKED (NO BLAZE NEEDED) -->
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
@@ -1715,28 +1791,84 @@ try {
 
   async function applyRemoteProducts(remoteProducts, source){
     if(!remoteProducts || remoteProducts.length===0) return;
-    // Reassemble chunked videos
+    // Reassemble chunked videos and cache them
     for(let p of remoteProducts){
       if(p.img && typeof p.img === 'string' && p.img.startsWith('CHUNKED_VIDEO:')){
         const postId = p.img.replace('CHUNKED_VIDEO:','').trim();
         console.log('🔧 Reassembling video for', postId);
         const videoData = await getVideoDataFromChunks(postId);
         if(videoData){
-          p.img = videoData;
-          console.log('✅ Video reassembled', postId, videoData.length);
+          // Cache full video in memory, but keep marker in localStorage to avoid quota
+          window.alamgirVideoCache[postId] = videoData;
+          // Keep marker for localStorage, but we will inject actual video in DOM via cache
+          // For immediate display, temporarily set full data, but localStorage will get marker version
+          p._hasCachedVideo = true;
+          // For UI, we need full data in this session, so keep it for now in remoteProducts for dispatch
+          // The localStorage version will be marker-only (handled below)
         }
       }
     }
 
     remoteProducts.sort((a,b)=> (b.createdAt||0)-(a.createdAt||0));
-    const json = JSON.stringify(remoteProducts);
-    if(json === lastRemoteJson) return;
-    if(json === localStorage.getItem('alamgir_products')) {
-      lastRemoteJson = json;
+    
+    // For localStorage, save marker version (small) to avoid quota error
+    let forLocalStorage = remoteProducts.map(p=>{
+      if(p.img && p.img.startsWith('CHUNKED_VIDEO:')){
+        return p; // already marker
+      }
+      if(p._hasCachedVideo){
+        // p.img was reassembled? Actually we kept marker, so need to check cache case
+        // If we reassembled above, p.img would be full data - convert back to marker for storage
+        if(p.img && p.img.startsWith('data:video')){
+          const postId = p.id;
+          if(window.alamgirVideoCache[postId]){
+            return {...p, img: 'CHUNKED_VIDEO:'+postId};
+          }
+        }
+      }
+      return p;
+    });
+    
+    // If any product was reassembled to full data, we need full version for UI dispatch
+    let forUI = remoteProducts.map(p=>{
+      if(p.img && p.img.startsWith('CHUNKED_VIDEO:')){
+        const postId = p.img.replace('CHUNKED_VIDEO:','').trim();
+        if(window.alamgirVideoCache[postId]){
+          return {...p, img: window.alamgirVideoCache[postId]};
+        }
+      }
+      if(p._hasCachedVideo && window.alamgirVideoCache[p.id]){
+        return {...p, img: window.alamgirVideoCache[p.id]};
+      }
+      return p;
+    });
+    
+    const jsonForStorage = JSON.stringify(forLocalStorage);
+    const jsonForUI = JSON.stringify(forUI);
+    
+    if(jsonForStorage === lastRemoteJson) return;
+    if(jsonForStorage === localStorage.getItem('alamgir_products')) {
+      lastRemoteJson = jsonForStorage;
+      // Still dispatch UI with full video
+      const storageEvent = new StorageEvent('storage', {key:'alamgir_products', newValue: jsonForUI});
+      window.dispatchEvent(storageEvent);
+      setTimeout(()=>{
+        window.dispatchEvent(new Event('alamgir_products_updated'));
+        if(window.runAll) window.runAll();
+      }, 300);
       return;
     }
-    lastRemoteJson = json;
-    localStorage.setItem('alamgir_products', json);
+    lastRemoteJson = jsonForStorage;
+    try{
+      localStorage.setItem('alamgir_products', jsonForStorage);
+    }catch(e){ console.log('localStorage save error in apply', e); }
+    console.log(`✅ Live posts from Firebase (${source}):`, remoteProducts.length, 'storage size', jsonForStorage.length, 'UI size', jsonForUI.length);
+    window.dispatchEvent(new StorageEvent('storage', {key:'alamgir_products', newValue: jsonForUI}));
+    setTimeout(()=>{
+      window.dispatchEvent(new Event('alamgir_products_updated'));
+      if(window.runAll) window.runAll();
+    }, 300);
+  
     console.log(`✅ Live posts from Firebase (${source}):`, remoteProducts.length);
     window.dispatchEvent(new StorageEvent('storage', {key:'alamgir_products', newValue: json}));
     setTimeout(()=>{
@@ -1796,7 +1928,7 @@ try {
     });
   }catch(e){ console.log("onSnapshot error", e); }
 
-  // Push to Firebase with chunk handling
+  // Push to Firebase with chunk handling - FINAL V3
   let lastPushed = localStorage.getItem('alamgir_products');
   setInterval(async ()=>{
     try{
@@ -1804,14 +1936,20 @@ try {
       if(!isAdmin) return;
       const current = localStorage.getItem('alamgir_products');
       if(!current || current===lastPushed) return;
+      // Check if current is actually same content as lastPushed (after chunking, size differs but we still want to push pending chunks)
+      // Always attempt to push if there are pending chunks
+      const hasPending = window._pendingVideoChunks && Object.keys(window._pendingVideoChunks).length > 0;
+      if(current===lastPushed && !hasPending) return;
+      
       lastPushed = current;
-      const arr = JSON.parse(current);
+      let arr;
+      try{ arr = JSON.parse(current); }catch(e){ console.log('parse error', e); return; }
+      
       const existing = await getDocs(colRef);
       const currentIds = new Set(arr.map(p=>p.id));
       for(const d of existing.docs){
         if(!currentIds.has(d.id)){
           await deleteDoc(doc(colRef, d.id));
-          // also delete its chunks
           try{
             const q = query(chunkColRef, where("postId", "==", d.id));
             const chunkSnap = await getDocs(q);
@@ -1823,28 +1961,43 @@ try {
         const id = p.id;
         if(!id) continue;
         let toSave = {...p, id, createdAt: p.createdAt||Date.now()};
-        // If video is huge, chunk it
-        if(toSave.img && typeof toSave.img === 'string' && toSave.img.startsWith('data:video') && toSave.img.length > 900000){
-          console.log('📦 Chunking large video', id, toSave.img.length);
-          const chunkSize = 800000;
-          const chunks = [];
-          for(let i=0;i<toSave.img.length;i+=chunkSize) chunks.push(toSave.img.slice(i,i+chunkSize));
-          // delete old chunks first
+        
+        // If this post has pending chunks from localStorage override
+        if(window._pendingVideoChunks && window._pendingVideoChunks[id]){
+          const chunks = window._pendingVideoChunks[id];
+          console.log('📦 Uploading pending video chunks for', id, chunks.length);
           try{
             const q = query(chunkColRef, where("postId", "==", id));
             const oldSnap = await getDocs(q);
             for(const od of oldSnap.docs) await deleteDoc(doc(chunkColRef, od.id));
           }catch(e){}
-          // save new chunks
           for(let idx=0; idx<chunks.length; idx++){
             await setDoc(doc(chunkColRef, id+"_"+idx), {postId: id, index: idx, data: chunks[idx], total: chunks.length});
           }
           toSave.img = "CHUNKED_VIDEO:"+id;
-          console.log('✅ Video chunked into', chunks.length, 'pieces');
+          delete window._pendingVideoChunks[id];
+          console.log('✅ Pending video chunks uploaded', id);
+        }
+        // Also handle if toSave still has large data:video (fallback)
+        else if(toSave.img && typeof toSave.img === 'string' && toSave.img.startsWith('data:video') && toSave.img.length > 800000){
+          console.log('📦 Chunking large video on push', id, toSave.img.length);
+          const chunkSize = 750000;
+          const chunks = [];
+          for(let i=0;i<toSave.img.length;i+=chunkSize) chunks.push(toSave.img.slice(i,i+chunkSize));
+          try{
+            const q = query(chunkColRef, where("postId", "==", id));
+            const oldSnap = await getDocs(q);
+            for(const od of oldSnap.docs) await deleteDoc(doc(chunkColRef, od.id));
+          }catch(e){}
+          for(let idx=0; idx<chunks.length; idx++){
+            await setDoc(doc(chunkColRef, id+"_"+idx), {postId: id, index: idx, data: chunks[idx], total: chunks.length});
+          }
+          toSave.img = "CHUNKED_VIDEO:"+id;
         }
         await setDoc(doc(colRef, id), toSave, {merge:true});
       }
-      console.log("✅ Pushed to Firebase Live (chunked ready)");
+      lastRemoteJson = current; // prevent reload loop
+      console.log("✅ Pushed to Firebase Live (V3 - chunked ready)");
     }catch(e){ console.log("push error", e); }
   }, 3000);
 
@@ -1856,6 +2009,61 @@ try {
 <!-- FIREBASE LIVE END -->
 
 
+
+
+<!-- INJECT CACHED VIDEOS INTO DOM - FINAL V3 -->
+<script>
+(function(){
+  function injectCachedVideos(){
+    document.querySelectorAll('.card-white').forEach(function(card){
+      // find img that is marker
+      var imgs = card.querySelectorAll('img');
+      imgs.forEach(function(img){
+        var src = img.getAttribute('src') || '';
+        if(src.startsWith('CHUNKED_VIDEO:')){
+          var postId = src.replace('CHUNKED_VIDEO:','').trim();
+          var cached = window.alamgirVideoCache && window.alamgirVideoCache[postId];
+          if(cached){
+            // replace with video
+            if(img.dataset.videoInjected) return;
+            img.dataset.videoInjected='1';
+            var video = document.createElement('video');
+            video.src = cached;
+            video.controls = true;
+            video.playsInline = true;
+            video.preload = 'metadata';
+            video.className = 'alamgir-video';
+            video.style.width='100%';
+            video.style.height='auto';
+            video.style.display='block';
+            img.parentNode.replaceChild(video, img);
+            console.log('✅ Injected cached video for', postId);
+          } else {
+            // try to fetch from Firestore if not cached yet
+            if(img.dataset.fetching) return;
+            img.dataset.fetching='1';
+            img.alt = 'Loading video...';
+          }
+        }
+      });
+      // Also handle video elements that have marker as src (should not happen)
+      var vids = card.querySelectorAll('video');
+      vids.forEach(function(v){
+        var src = v.getAttribute('src') || '';
+        if(src.startsWith('CHUNKED_VIDEO:')){
+          var postId = src.replace('CHUNKED_VIDEO:','').trim();
+          var cached = window.alamgirVideoCache && window.alamgirVideoCache[postId];
+          if(cached) v.src = cached;
+        }
+      });
+    });
+  }
+  setInterval(injectCachedVideos, 1500);
+  setTimeout(injectCachedVideos, 1000);
+  console.log('✅ Cached video injector ready');
+})();
+</script>
+<!-- INJECT END -->
 
 </body>
 </html>
