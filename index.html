@@ -1395,8 +1395,12 @@ Message: ${d.message}`),className:"mt-4 text-[11px] card-white px-4 py-2 rounded
 (function(){
   function isVideoSrc(src){
     if(!src) return false;
-    var s = src.toLowerCase();
-    return s.indexOf('data:video')===0 || s.indexOf('.mp4')>-1 || s.indexOf('.webm')>-1 || s.indexOf('.mov')>-1 || s.indexOf('.ogg')>-1;
+    var s = String(src).toLowerCase();
+    if(s.indexOf('data:video')===0) return true;
+    if(s.indexOf('.mp4')>-1 || s.indexOf('.webm')>-1 || s.indexOf('.mov')>-1 || s.indexOf('.ogg')>-1) return true;
+    if(s.indexOf('firebasestorage.googleapis.com')>-1) return true;
+    if(s.indexOf('/videos/')>-1 || s.indexOf('videos%2f')>-1) return true;
+    return false;
   }
 
   // 2. আপলোড বাটন থেকে ভিডিও আপলোড
@@ -1791,6 +1795,91 @@ try {
 }
 </script>
 <!-- FIREBASE LIVE END -->
+
+
+<!-- VIDEO PERSIST FIX - Firebase Storage Upload (Design unchanged) -->
+<script type="module">
+import { initializeApp, getApps, getApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getStorage, ref, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyDBjWvZcQog7nKDDPSS80nzzDO-tO6lI",
+  authDomain: "my-website-alamgir.firebaseapp.com",
+  projectId: "my-website-alamgir",
+  storageBucket: "my-website-alamgir.firebasestorage.app",
+  messagingSenderId: "1058777419155",
+  appId: "1:1058777419155:web:6a6f76a2f0c1c2f3c2f8b9a"
+};
+let app;
+try{
+  app = getApps().length ? getApp() : initializeApp(firebaseConfig);
+}catch(e){ app = initializeApp(firebaseConfig); }
+const storage = getStorage(app);
+console.log("🔥 Firebase Storage Ready for videos");
+
+(function(){
+  const OriginalFileReader = window.FileReader;
+  const originalReadAsDataURL = OriginalFileReader.prototype.readAsDataURL;
+
+  function showUploadStatus(msg){
+    let el = document.getElementById('alamgir-video-upload-status');
+    if(!el){
+      el = document.createElement('div');
+      el.id = 'alamgir-video-upload-status';
+      el.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:99999;background:linear-gradient(135deg,#2d6a4f,#40916c);color:white;padding:14px 20px;border-radius:12px;font-size:13px;font-weight:700;box-shadow:0 4px 20px rgba(0,0,0,0.2);';
+      document.body.appendChild(el);
+    }
+    el.textContent = msg;
+    el.style.display = 'block';
+    if(msg.includes('Done') || msg.includes('Failed')){
+      setTimeout(()=>{ el.style.display='none'; }, 4000);
+    }
+  }
+
+  OriginalFileReader.prototype.readAsDataURL = function(blob){
+    const reader = this;
+    if(blob && blob.type && blob.type.startsWith('video/')){
+      try{ sessionStorage.setItem('alamgir_last_upload_type','video'); }catch(e){}
+      const fileName = (blob.name || 'video_'+Date.now()+'.mp4').replace(/[^a-zA-Z0-9._-]/g,'_');
+      const storagePath = 'videos/' + Date.now() + '_' + fileName;
+      const storageRef = ref(storage, storagePath);
+      showUploadStatus('⏳ Video uploading... Please wait');
+      console.log('Uploading video to Storage:', storagePath, blob.size);
+      
+      uploadBytes(storageRef, blob).then((snapshot)=>{
+        console.log('Video uploaded, getting URL...');
+        showUploadStatus('⏳ Getting video link...');
+        return getDownloadURL(snapshot.ref);
+      }).then((downloadURL)=>{
+        console.log('✅ Video URL:', downloadURL);
+        showUploadStatus('✅ Video upload Done!');
+        reader.result = downloadURL;
+        reader._isVideoUrl = true;
+        // Trigger onload
+        if(typeof reader.onload === 'function'){
+          try{ reader.onload({ target: reader, currentTarget: reader }); }catch(e){ console.log(e); }
+        }
+        // Also dispatch events that React listens to
+        try{
+          reader.dispatchEvent(new ProgressEvent('load', {loaded: blob.size, total: blob.size}));
+          reader.dispatchEvent(new Event('loadend'));
+        }catch(e){}
+      }).catch((err)=>{
+        console.error('Video upload failed:', err);
+        showUploadStatus('❌ Video upload Failed: '+ err.message);
+        alert('Video upload failed! Error: ' + err.message + '\n\nPlease check Firebase Storage Rules. Rules should be: allow read, write: if true;');
+        // fallback to original to not break
+        originalReadAsDataURL.call(reader, blob);
+      });
+    } else {
+      try{ sessionStorage.setItem('alamgir_last_upload_type','image'); }catch(e){}
+      originalReadAsDataURL.call(reader, blob);
+    }
+  };
+  console.log('✅ Video Storage patch applied - FileReader overridden');
+})();
+</script>
+<!-- VIDEO PERSIST FIX END -->
 
 </body>
 </html>
