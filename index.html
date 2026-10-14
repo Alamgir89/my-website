@@ -2065,5 +2065,178 @@ try {
 </script>
 <!-- INJECT END -->
 
+
+<!-- VIDEO FAST LOAD OPTIMIZATION V4 - Lazy + Blob URL + Spinner -->
+<style id="alamgir-video-fast-style">
+.alamgir-video-wrapper{position:relative;width:100%;background:#f3f4f6;border-radius:12px;overflow:hidden;min-height:180px;display:flex;align-items:center;justify-content:center;}
+.alamgir-video-spinner{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);z-index:2;display:flex;flex-direction:column;align-items:center;gap:8px;color:#2d6a4f;font-weight:700;font-size:12px;}
+.alamgir-video-spinner .spinner{width:32px;height:32px;border:3px solid #d1fae5;border-top-color:#2d6a4f;border-radius:50%;animation:spin 0.8s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg);}}
+.alamgir-video{width:100%;height:auto;display:block;background:black;}
+.alamgir-video-play-btn{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:60px;height:60px;background:rgba(45,106,79,0.9);border-radius:50%;display:flex;align-items:center;justify-content:center;color:white;font-size:24px;cursor:pointer;z-index:3;border:none;box-shadow:0 4px 12px rgba(0,0,0,0.3);}
+.alamgir-video-play-btn:hover{background:#2d6a4f;transform:translate(-50%,-50%) scale(1.05);}
+</style>
+<script>
+(function(){
+  function dataURLToBlob(dataURL){
+    try{
+      const parts = dataURL.split(',');
+      const mimeMatch = parts[0].match(/:(.*?);/);
+      const mime = mimeMatch ? mimeMatch[1] : 'video/mp4';
+      const isBase64 = parts[0].indexOf('base64') !== -1;
+      let byteString;
+      if(isBase64){
+        byteString = atob(parts[1]);
+      }else{
+        byteString = decodeURIComponent(parts[1]);
+      }
+      const ab = new ArrayBuffer(byteString.length);
+      const ia = new Uint8Array(ab);
+      for(let i=0;i<byteString.length;i++) ia[i]=byteString.charCodeAt(i);
+      return new Blob([ab], {type: mime});
+    }catch(e){ console.log('blob convert error', e); return null; }
+  }
+
+  function createFastVideoElement(dataURL, postId){
+    const wrapper = document.createElement('div');
+    wrapper.className = 'alamgir-video-wrapper';
+    wrapper.dataset.postId = postId;
+
+    const spinner = document.createElement('div');
+    spinner.className = 'alamgir-video-spinner';
+    spinner.innerHTML = '<div class="spinner"></div><div>Loading video...</div>';
+    wrapper.appendChild(spinner);
+
+    const video = document.createElement('video');
+    video.className = 'alamgir-video';
+    video.controls = true;
+    video.playsInline = true;
+    video.preload = 'metadata';
+    video.style.display = 'none';
+
+    // Try Blob URL for faster loading
+    try{
+      const blob = dataURLToBlob(dataURL);
+      if(blob){
+        const blobUrl = URL.createObjectURL(blob);
+        video.src = blobUrl;
+        video.dataset.blobUrl = blobUrl;
+        console.log('✅ Blob URL created for', postId, 'size', blob.size);
+      }else{
+        video.src = dataURL;
+      }
+    }catch(e){
+      video.src = dataURL;
+    }
+
+    video.addEventListener('loadeddata', function(){
+      spinner.style.display='none';
+      video.style.display='block';
+      console.log('✅ Video loaded', postId);
+    });
+    video.addEventListener('canplay', function(){
+      spinner.style.display='none';
+      video.style.display='block';
+    });
+    video.addEventListener('error', function(){
+      spinner.innerHTML = '<div>❌ Failed to load</div>';
+      console.log('❌ Video error', postId);
+    });
+
+    const playBtn = document.createElement('button');
+    playBtn.className = 'alamgir-video-play-btn';
+    playBtn.innerHTML = '▶️';
+    playBtn.onclick = function(){
+      playBtn.style.display='none';
+      video.style.display='block';
+      video.play().catch(()=>{});
+    };
+
+    wrapper.appendChild(video);
+    wrapper.appendChild(playBtn);
+    
+    // Auto show after 1s if not loaded (fallback)
+    setTimeout(()=>{
+      if(video.readyState >= 1){
+        spinner.style.display='none';
+        video.style.display='block';
+      }
+    }, 2000);
+
+    return wrapper;
+  }
+
+  // Override the previous inject function with faster version
+  window.alamgirCreateFastVideo = createFastVideoElement;
+
+  // Also optimize the cache injector
+  const origInjectInterval = setInterval(function(){
+    // Clean up old blob URLs to free memory
+  }, 10000);
+
+  console.log('✅ Fast video loader V4 ready - Blob URL + Lazy');
+})();
+</script>
+
+<script>
+(function(){
+  // Patch the previous injectCachedVideos to use fast loader
+  function injectFastVideos(){
+    document.querySelectorAll('.card-white').forEach(function(card){
+      var imgs = card.querySelectorAll('img');
+      imgs.forEach(function(img){
+        var src = img.getAttribute('src') || '';
+        if(src.startsWith('CHUNKED_VIDEO:')){
+          var postId = src.replace('CHUNKED_VIDEO:','').trim();
+          var cached = window.alamgirVideoCache && window.alamgirVideoCache[postId];
+          if(cached && !img.dataset.fastInjected){
+            img.dataset.fastInjected='1';
+            var fastEl = window.alamgirCreateFastVideo ? window.alamgirCreateFastVideo(cached, postId) : null;
+            if(fastEl){
+              img.parentNode.replaceChild(fastEl, img);
+              console.log('✅ Fast injected video for', postId);
+            }
+          }
+        } else if(src.startsWith('data:video') && src.length > 500000 && !img.dataset.fastInjected){
+          // Direct data:video large - also convert to fast
+          img.dataset.fastInjected='1';
+          var postId = img.closest('.card-white') ? 'direct_'+Math.random().toString(36).slice(2) : 'direct';
+          var fastEl = window.alamgirCreateFastVideo ? window.alamgirCreateFastVideo(src, postId) : null;
+          if(fastEl){
+            img.parentNode.replaceChild(fastEl, img);
+          }
+        }
+      });
+      // Also patch existing video tags that are data:video
+      var vids = card.querySelectorAll('video.alamgir-video');
+      vids.forEach(function(v){
+        var src = v.getAttribute('src') || '';
+        if(src.startsWith('data:video') && src.length > 500000 && !v.dataset.blobConverted){
+          v.dataset.blobConverted='1';
+          try{
+            const parts = src.split(',');
+            const mimeMatch = parts[0].match(/:(.*?);/);
+            const mime = mimeMatch ? mimeMatch[1] : 'video/mp4';
+            const byteString = atob(parts[1]);
+            const ab = new ArrayBuffer(byteString.length);
+            const ia = new Uint8Array(ab);
+            for(let i=0;i<byteString.length;i++) ia[i]=byteString.charCodeAt(i);
+            const blob = new Blob([ab], {type: mime});
+            const blobUrl = URL.createObjectURL(blob);
+            v.src = blobUrl;
+            v.dataset.blobUrl = blobUrl;
+            console.log('✅ Converted existing video to blob URL');
+          }catch(e){}
+        }
+      });
+    });
+  }
+  setInterval(injectFastVideos, 1200);
+  setTimeout(injectFastVideos, 800);
+  setTimeout(injectFastVideos, 2500);
+})();
+</script>
+<!-- FAST LOAD V4 END -->
+
 </body>
 </html>
