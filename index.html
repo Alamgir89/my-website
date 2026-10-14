@@ -1669,10 +1669,10 @@ Message: ${d.message}`),className:"mt-4 text-[11px] card-white px-4 py-2 rounded
 <!-- FIX END -->
 
 
-<!-- FIREBASE LIVE SYNC - ADDED FOR LIVE VISITORS - DOES NOT CHANGE DESIGN -->
+<!-- FIREBASE LIVE SYNC - FIXED NO RELOAD LOOP - DOES NOT CHANGE DESIGN -->
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getFirestore, collection, doc, setDoc, getDocs, onSnapshot, deleteDoc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getFirestore, collection, doc, setDoc, getDocs, onSnapshot, deleteDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyDBjWvZcQog7nKDDPSS80nzzDO-tO6lI",
@@ -1687,54 +1687,55 @@ try {
   const app = initializeApp(firebaseConfig);
   const db = getFirestore(app);
   const colRef = collection(db, "tiny-hacks-posts");
-  const metaDoc = doc(db, "tiny-hacks-meta", "products");
+  console.log("🔥 Firebase Live Connected - No Reload Mode");
 
-  console.log("🔥 Firebase Live Connected for tiny-space-hacks");
+  let isInitialLoad = true;
+  let lastRemoteJson = null;
 
-  // 1. Load from Firebase and override localStorage for ALL visitors (live)
+  // Load from Firebase without reload
+  async function applyRemoteProducts(remoteProducts, source){
+    if(!remoteProducts || remoteProducts.length===0) return;
+    remoteProducts.sort((a,b)=> (b.createdAt||0)-(a.createdAt||0));
+    const json = JSON.stringify(remoteProducts);
+    if(json === lastRemoteJson) return; // already applied
+    if(json === localStorage.getItem('alamgir_products')) {
+      lastRemoteJson = json;
+      return;
+    }
+    lastRemoteJson = json;
+    localStorage.setItem('alamgir_products', json);
+    console.log(`✅ Live posts from Firebase (${source}):`, remoteProducts.length);
+    // Trigger UI update without reload
+    window.dispatchEvent(new StorageEvent('storage', {key:'alamgir_products', newValue: json}));
+    // Also trigger custom event for React
+    setTimeout(()=>{
+      window.dispatchEvent(new Event('alamgir_products_updated'));
+      // Force re-render by touching DOM if needed
+      if(window.runAll) window.runAll();
+    }, 300);
+  }
+
+  // Initial load
   async function loadFromFirebaseLive(){
     try{
       const snap = await getDocs(colRef);
       if(!snap.empty){
         const remoteProducts = [];
         snap.forEach(d => { remoteProducts.push(d.data()); });
-        // sort by timestamp desc
-        remoteProducts.sort((a,b)=> (b.createdAt||0)-(a.createdAt||0));
-        const json = JSON.stringify(remoteProducts);
-        const local = localStorage.getItem('alamgir_products');
-        if(local !== json){
-          localStorage.setItem('alamgir_products', json);
-          console.log("✅ Live posts loaded from Firebase:", remoteProducts.length);
-          // Reload for visitors to see new posts instantly
-          if(!sessionStorage.getItem('firebase_live_reloaded')){
-            sessionStorage.setItem('firebase_live_reloaded','1');
-            setTimeout(()=>window.location.reload(), 800);
-          } else {
-            // Trigger React re-render by dispatching storage event
-            window.dispatchEvent(new Event('storage'));
-            // Force re-run of patch functions if exist
-            if(window.location.reload) {
-              // Try to trigger app update without full reload
-              setTimeout(()=>{ 
-                const evt = new StorageEvent('storage', {key:'alamgir_products', newValue: json});
-                window.dispatchEvent(evt);
-              }, 500);
-            }
-          }
-        }
+        await applyRemoteProducts(remoteProducts, 'initial');
       } else {
-        // If Firebase empty, seed it from localStorage (first time admin)
+        // Seed only once
         const localRaw = localStorage.getItem('alamgir_products');
-        if(localRaw){
+        if(localRaw && !localStorage.getItem('firebase_seeded')){
           try{
             const localArr = JSON.parse(localRaw);
             if(localArr.length>0){
-              console.log("Seeding Firebase with local 15 posts...");
+              console.log("Seeding Firebase first time...");
+              localStorage.setItem('firebase_seeded','1');
               for(const p of localArr){
                 const id = p.id || ('p_'+Date.now()+'_'+Math.random().toString(36).slice(2));
                 await setDoc(doc(colRef, id), {...p, id, createdAt: p.createdAt||Date.now()});
               }
-              console.log("✅ Firebase seeded with", localArr.length);
             }
           }catch(e){ console.log("seed error", e); }
         }
@@ -1742,26 +1743,22 @@ try {
     }catch(e){ console.log("Firebase load error", e); }
   }
 
-  // Real-time listener - when admin adds/deletes, all visitors get update instantly
+  // Real-time listener - NO RELOAD, just update storage
   try{
     onSnapshot(colRef, (snapshot)=>{
+      if(isInitialLoad){
+        isInitialLoad = false;
+        return; // skip first snapshot to avoid double load
+      }
       const remoteProducts = [];
       snapshot.forEach(d => remoteProducts.push(d.data()));
       if(remoteProducts.length>0){
-        remoteProducts.sort((a,b)=> (b.createdAt||0)-(a.createdAt||0));
-        const json = JSON.stringify(remoteProducts);
-        const local = localStorage.getItem('alamgir_products');
-        if(local !== json){
-          localStorage.setItem('alamgir_products', json);
-          console.log("🔥 LIVE UPDATE from Firebase:", remoteProducts.length);
-          // Auto reload for visitors to see instantly
-          setTimeout(()=>window.location.reload(), 600);
-        }
+        applyRemoteProducts(remoteProducts, 'live');
       }
     });
   }catch(e){ console.log("onSnapshot error", e); }
 
-  // 2. When admin saves (localStorage changes), push to Firebase
+  // Push to Firebase when admin saves
   let lastPushed = localStorage.getItem('alamgir_products');
   setInterval(async ()=>{
     try{
@@ -1771,30 +1768,24 @@ try {
       if(!current || current===lastPushed) return;
       lastPushed = current;
       const arr = JSON.parse(current);
-      console.log("Pushing to Firebase Live...", arr.length);
-      // Clear and re-add (simple sync)
       const existing = await getDocs(colRef);
-      // Delete removed items
       const currentIds = new Set(arr.map(p=>p.id));
       for(const d of existing.docs){
         if(!currentIds.has(d.id)){
           await deleteDoc(doc(colRef, d.id));
         }
       }
-      // Add/update
       for(const p of arr){
-        const id = p.id || ('p_'+Date.now()+'_'+Math.random().toString(36).slice(2));
+        const id = p.id;
+        if(!id) continue;
         await setDoc(doc(colRef, id), {...p, id, createdAt: p.createdAt||Date.now()}, {merge:true});
       }
+      lastRemoteJson = current;
       console.log("✅ Pushed to Firebase Live");
     }catch(e){ console.log("push error", e); }
-  }, 2000);
+  }, 3000);
 
-  // Initial load
-  setTimeout(loadFromFirebaseLive, 1000);
-  setTimeout(loadFromFirebaseLive, 3000);
-
-  window.firebaseLive = { loadFromFirebaseLive, db, colRef };
+  setTimeout(loadFromFirebaseLive, 1200);
 } catch(e){
   console.log("Firebase init failed", e);
 }
