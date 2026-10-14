@@ -1673,10 +1673,10 @@ Message: ${d.message}`),className:"mt-4 text-[11px] card-white px-4 py-2 rounded
 <!-- FIX END -->
 
 
-<!-- FIREBASE LIVE SYNC - FIXED NO RELOAD LOOP - DOES NOT CHANGE DESIGN -->
+<!-- FIREBASE LIVE SYNC - FIXED NO RELOAD + VIDEO CHUNKED (NO BLAZE NEEDED) -->
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getFirestore, collection, doc, setDoc, getDocs, onSnapshot, deleteDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getFirestore, collection, doc, setDoc, getDocs, onSnapshot, deleteDoc, query, where } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyDBjWvZcQog7nKDDPSS80nzzDO-tO6lI",
@@ -1691,17 +1691,46 @@ try {
   const app = initializeApp(firebaseConfig);
   const db = getFirestore(app);
   const colRef = collection(db, "tiny-hacks-posts");
-  console.log("🔥 Firebase Live Connected - No Reload Mode");
+  const chunkColRef = collection(db, "tiny-hacks-video-chunks");
+  console.log("🔥 Firebase Live Connected - Chunked Video Mode (Spark Free)");
 
   let isInitialLoad = true;
   let lastRemoteJson = null;
 
-  // Load from Firebase without reload
+  async function getVideoDataFromChunks(postId){
+    try{
+      const q = query(chunkColRef, where("postId", "==", postId));
+      const snap = await getDocs(q);
+      if(snap.empty) return null;
+      const chunks = [];
+      snap.forEach(d=>{
+        const data = d.data();
+        chunks[data.index] = data.data;
+      });
+      if(chunks.length===0) return null;
+      const joined = chunks.join("");
+      return joined;
+    }catch(e){ console.log("chunk fetch error", e); return null; }
+  }
+
   async function applyRemoteProducts(remoteProducts, source){
     if(!remoteProducts || remoteProducts.length===0) return;
+    // Reassemble chunked videos
+    for(let p of remoteProducts){
+      if(p.img && typeof p.img === 'string' && p.img.startsWith('CHUNKED_VIDEO:')){
+        const postId = p.img.replace('CHUNKED_VIDEO:','').trim();
+        console.log('🔧 Reassembling video for', postId);
+        const videoData = await getVideoDataFromChunks(postId);
+        if(videoData){
+          p.img = videoData;
+          console.log('✅ Video reassembled', postId, videoData.length);
+        }
+      }
+    }
+
     remoteProducts.sort((a,b)=> (b.createdAt||0)-(a.createdAt||0));
     const json = JSON.stringify(remoteProducts);
-    if(json === lastRemoteJson) return; // already applied
+    if(json === lastRemoteJson) return;
     if(json === localStorage.getItem('alamgir_products')) {
       lastRemoteJson = json;
       return;
@@ -1709,17 +1738,13 @@ try {
     lastRemoteJson = json;
     localStorage.setItem('alamgir_products', json);
     console.log(`✅ Live posts from Firebase (${source}):`, remoteProducts.length);
-    // Trigger UI update without reload
     window.dispatchEvent(new StorageEvent('storage', {key:'alamgir_products', newValue: json}));
-    // Also trigger custom event for React
     setTimeout(()=>{
       window.dispatchEvent(new Event('alamgir_products_updated'));
-      // Force re-render by touching DOM if needed
       if(window.runAll) window.runAll();
     }, 300);
   }
 
-  // Initial load
   async function loadFromFirebaseLive(){
     try{
       const snap = await getDocs(colRef);
@@ -1728,7 +1753,6 @@ try {
         snap.forEach(d => { remoteProducts.push(d.data()); });
         await applyRemoteProducts(remoteProducts, 'initial');
       } else {
-        // Seed only once
         const localRaw = localStorage.getItem('alamgir_products');
         if(localRaw && !localStorage.getItem('firebase_seeded')){
           try{
@@ -1738,7 +1762,18 @@ try {
               localStorage.setItem('firebase_seeded','1');
               for(const p of localArr){
                 const id = p.id || ('p_'+Date.now()+'_'+Math.random().toString(36).slice(2));
-                await setDoc(doc(colRef, id), {...p, id, createdAt: p.createdAt||Date.now()});
+                // Don't seed huge videos as is, chunk them
+                let toSave = {...p, id, createdAt: p.createdAt||Date.now()};
+                if(toSave.img && toSave.img.length > 900000 && toSave.img.startsWith('data:video')){
+                  const chunks = [];
+                  const chunkSize = 800000;
+                  for(let i=0;i<toSave.img.length;i+=chunkSize) chunks.push(toSave.img.slice(i,i+chunkSize));
+                  for(let idx=0; idx<chunks.length; idx++){
+                    await setDoc(doc(chunkColRef, id+"_"+idx), {postId: id, index: idx, data: chunks[idx], total: chunks.length});
+                  }
+                  toSave.img = "CHUNKED_VIDEO:"+id;
+                }
+                await setDoc(doc(colRef, id), toSave);
               }
             }
           }catch(e){ console.log("seed error", e); }
@@ -1747,22 +1782,21 @@ try {
     }catch(e){ console.log("Firebase load error", e); }
   }
 
-  // Real-time listener - NO RELOAD, just update storage
   try{
-    onSnapshot(colRef, (snapshot)=>{
+    onSnapshot(colRef, async (snapshot)=>{
       if(isInitialLoad){
         isInitialLoad = false;
-        return; // skip first snapshot to avoid double load
+        return;
       }
       const remoteProducts = [];
       snapshot.forEach(d => remoteProducts.push(d.data()));
       if(remoteProducts.length>0){
-        applyRemoteProducts(remoteProducts, 'live');
+        await applyRemoteProducts(remoteProducts, 'live');
       }
     });
   }catch(e){ console.log("onSnapshot error", e); }
 
-  // Push to Firebase when admin saves
+  // Push to Firebase with chunk handling
   let lastPushed = localStorage.getItem('alamgir_products');
   setInterval(async ()=>{
     try{
@@ -1777,15 +1811,40 @@ try {
       for(const d of existing.docs){
         if(!currentIds.has(d.id)){
           await deleteDoc(doc(colRef, d.id));
+          // also delete its chunks
+          try{
+            const q = query(chunkColRef, where("postId", "==", d.id));
+            const chunkSnap = await getDocs(q);
+            for(const cd of chunkSnap.docs) await deleteDoc(doc(chunkColRef, cd.id));
+          }catch(e){}
         }
       }
       for(const p of arr){
         const id = p.id;
         if(!id) continue;
-        await setDoc(doc(colRef, id), {...p, id, createdAt: p.createdAt||Date.now()}, {merge:true});
+        let toSave = {...p, id, createdAt: p.createdAt||Date.now()};
+        // If video is huge, chunk it
+        if(toSave.img && typeof toSave.img === 'string' && toSave.img.startsWith('data:video') && toSave.img.length > 900000){
+          console.log('📦 Chunking large video', id, toSave.img.length);
+          const chunkSize = 800000;
+          const chunks = [];
+          for(let i=0;i<toSave.img.length;i+=chunkSize) chunks.push(toSave.img.slice(i,i+chunkSize));
+          // delete old chunks first
+          try{
+            const q = query(chunkColRef, where("postId", "==", id));
+            const oldSnap = await getDocs(q);
+            for(const od of oldSnap.docs) await deleteDoc(doc(chunkColRef, od.id));
+          }catch(e){}
+          // save new chunks
+          for(let idx=0; idx<chunks.length; idx++){
+            await setDoc(doc(chunkColRef, id+"_"+idx), {postId: id, index: idx, data: chunks[idx], total: chunks.length});
+          }
+          toSave.img = "CHUNKED_VIDEO:"+id;
+          console.log('✅ Video chunked into', chunks.length, 'pieces');
+        }
+        await setDoc(doc(colRef, id), toSave, {merge:true});
       }
-      lastRemoteJson = current;
-      console.log("✅ Pushed to Firebase Live");
+      console.log("✅ Pushed to Firebase Live (chunked ready)");
     }catch(e){ console.log("push error", e); }
   }, 3000);
 
@@ -1797,89 +1856,6 @@ try {
 <!-- FIREBASE LIVE END -->
 
 
-<!-- VIDEO PERSIST FIX - Firebase Storage Upload (Design unchanged) -->
-<script type="module">
-import { initializeApp, getApps, getApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getStorage, ref, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
-
-const firebaseConfig = {
-  apiKey: "AIzaSyDBjWvZcQog7nKDDPSS80nzzDO-tO6lI",
-  authDomain: "my-website-alamgir.firebaseapp.com",
-  projectId: "my-website-alamgir",
-  storageBucket: "my-website-alamgir.firebasestorage.app",
-  messagingSenderId: "1058777419155",
-  appId: "1:1058777419155:web:6a6f76a2f0c1c2f3c2f8b9a"
-};
-let app;
-try{
-  app = getApps().length ? getApp() : initializeApp(firebaseConfig);
-}catch(e){ app = initializeApp(firebaseConfig); }
-const storage = getStorage(app);
-console.log("🔥 Firebase Storage Ready for videos");
-
-(function(){
-  const OriginalFileReader = window.FileReader;
-  const originalReadAsDataURL = OriginalFileReader.prototype.readAsDataURL;
-
-  function showUploadStatus(msg){
-    let el = document.getElementById('alamgir-video-upload-status');
-    if(!el){
-      el = document.createElement('div');
-      el.id = 'alamgir-video-upload-status';
-      el.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:99999;background:linear-gradient(135deg,#2d6a4f,#40916c);color:white;padding:14px 20px;border-radius:12px;font-size:13px;font-weight:700;box-shadow:0 4px 20px rgba(0,0,0,0.2);';
-      document.body.appendChild(el);
-    }
-    el.textContent = msg;
-    el.style.display = 'block';
-    if(msg.includes('Done') || msg.includes('Failed')){
-      setTimeout(()=>{ el.style.display='none'; }, 4000);
-    }
-  }
-
-  OriginalFileReader.prototype.readAsDataURL = function(blob){
-    const reader = this;
-    if(blob && blob.type && blob.type.startsWith('video/')){
-      try{ sessionStorage.setItem('alamgir_last_upload_type','video'); }catch(e){}
-      const fileName = (blob.name || 'video_'+Date.now()+'.mp4').replace(/[^a-zA-Z0-9._-]/g,'_');
-      const storagePath = 'videos/' + Date.now() + '_' + fileName;
-      const storageRef = ref(storage, storagePath);
-      showUploadStatus('⏳ Video uploading... Please wait');
-      console.log('Uploading video to Storage:', storagePath, blob.size);
-      
-      uploadBytes(storageRef, blob).then((snapshot)=>{
-        console.log('Video uploaded, getting URL...');
-        showUploadStatus('⏳ Getting video link...');
-        return getDownloadURL(snapshot.ref);
-      }).then((downloadURL)=>{
-        console.log('✅ Video URL:', downloadURL);
-        showUploadStatus('✅ Video upload Done!');
-        reader.result = downloadURL;
-        reader._isVideoUrl = true;
-        // Trigger onload
-        if(typeof reader.onload === 'function'){
-          try{ reader.onload({ target: reader, currentTarget: reader }); }catch(e){ console.log(e); }
-        }
-        // Also dispatch events that React listens to
-        try{
-          reader.dispatchEvent(new ProgressEvent('load', {loaded: blob.size, total: blob.size}));
-          reader.dispatchEvent(new Event('loadend'));
-        }catch(e){}
-      }).catch((err)=>{
-        console.error('Video upload failed:', err);
-        showUploadStatus('❌ Video upload Failed: '+ err.message);
-        alert('Video upload failed! Error: ' + err.message + '\n\nPlease check Firebase Storage Rules. Rules should be: allow read, write: if true;');
-        // fallback to original to not break
-        originalReadAsDataURL.call(reader, blob);
-      });
-    } else {
-      try{ sessionStorage.setItem('alamgir_last_upload_type','image'); }catch(e){}
-      originalReadAsDataURL.call(reader, blob);
-    }
-  };
-  console.log('✅ Video Storage patch applied - FileReader overridden');
-})();
-</script>
-<!-- VIDEO PERSIST FIX END -->
 
 </body>
 </html>
