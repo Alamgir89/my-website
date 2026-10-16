@@ -220,6 +220,10 @@ body:not(.admin-authenticated) .card-white.px-3.py-1\.5.rounded-full.text-\[10px
 }
 </style>
 
+<link rel="preconnect" href="https://www.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://firestore.googleapis.com" crossorigin>
+<link rel="dns-prefetch" href="//www.gstatic.com">
+<link rel="dns-prefetch" href="//firestore.googleapis.com">
 </head>
 <body>
   <div id="root"></div>
@@ -379,7 +383,14 @@ Message: ${d.message}`),className:"mt-4 text-[11px] card-white px-4 py-2 rounded
       }
       // Fallback: try to find p.text-[#7A5B8A]
       if(!descEl){
-        descEl = card.querySelector('p.text-\[\#7A5B8A\]');
+        // Avoid invalid CSS selector escaping for Tailwind arbitrary-value classes
+        var candidates = card.querySelectorAll('p');
+        for(var j=0; j<candidates.length; j++){
+          if(candidates[j].classList.contains('text-[#7A5B8A]')){
+            descEl = candidates[j];
+            break;
+          }
+        }
       }
       if(!descEl) return;
       if(descEl.dataset.isProductDesc === '1') return;
@@ -418,18 +429,18 @@ Message: ${d.message}`),className:"mt-4 text-[11px] card-white px-4 py-2 rounded
     });
   }
 
-  // Run after page loads
+  // Run once after initial render; the debounced observer handles later products.
   setTimeout(setupProductDescToggle, 800);
-  setTimeout(setupProductDescToggle, 2000);
-  setTimeout(setupProductDescToggle, 3500);
-
-  // Watch for dynamic content (React re-renders)
+  var descToggleTimer = null;
   var observer = new MutationObserver(function(mutations){
     var shouldRun = false;
     mutations.forEach(function(m){
       if(m.addedNodes && m.addedNodes.length > 0) shouldRun = true;
     });
-    if(shouldRun) setupProductDescToggle();
+    if(shouldRun){
+      clearTimeout(descToggleTimer);
+      descToggleTimer = setTimeout(setupProductDescToggle, 180);
+    }
   });
   observer.observe(document.body, {childList: true, subtree: true});
 })();
@@ -769,15 +780,31 @@ Message: ${d.message}`),className:"mt-4 text-[11px] card-white px-4 py-2 rounded
       setCount('global', 'pinterest_visits', globalPinterest);
     }
 
-    // Add global stats bar at top of shop page (visible to all visitors)
-    var shopContainer = document.querySelector('#page-shop') || document.body;
-    if(shopContainer && !document.getElementById('global-analytics-stats')){
-      var globalStats = document.createElement('div');
-      globalStats.id = 'global-analytics-stats';
-      globalStats.style.cssText = 'margin:16px;padding:12px 16px;background:linear-gradient(135deg,#FFFBEB,#FEF3C7);border-radius:16px;border:1px solid #FDE68A;display:flex;flex-wrap:wrap;gap:12px;font-size:12px;font-weight:700;';
+    // Admin-only stats - never show on public site. Only inside Admin Panel and only when admin authenticated.
+    function renderAdminGlobalStats(){
+      // Remove any public global stats if exists
+      var oldPublic = document.getElementById('global-analytics-stats');
+      if(oldPublic) oldPublic.remove();
+      // Only proceed if admin authenticated
+      try {
+        var isAdmin = sessionStorage.getItem('alamgir_admin_auth') === 'true' || localStorage.getItem('alamgir_admin_auth') === 'true';
+        if(!isAdmin) {
+          var adminStats = document.getElementById('admin-only-global-stats');
+          if(adminStats) adminStats.remove();
+          return;
+        }
+      } catch(e){ return; }
+      // Find admin panel
+      var adminPanel = null;
+      document.querySelectorAll('div').forEach(function(d){
+        if(d.textContent.includes('Admin Panel') && d.textContent.includes('Add new products')){
+          adminPanel = d;
+        }
+      });
+      if(!adminPanel) return;
+      if(document.getElementById('admin-only-global-stats')) return;
       var totalPinterest = 0, totalAmazon = 0, totalLikes = 0, totalViews = 0;
       try {
-        // Sum up all product stats
         for(var i=0; i<localStorage.length; i++){
           var key = localStorage.key(i);
           if(key && key.startsWith('pinterest_')) totalPinterest += parseInt(localStorage.getItem(key)||'0');
@@ -786,20 +813,27 @@ Message: ${d.message}`),className:"mt-4 text-[11px] card-white px-4 py-2 rounded
           if(key && key.startsWith('view_')) totalViews += parseInt(localStorage.getItem(key)||'0');
         }
       } catch(e){}
-      globalStats.innerHTML = `
+      var adminStats = document.createElement('div');
+      adminStats.id = 'admin-only-global-stats';
+      adminStats.style.cssText = 'margin:12px 0;padding:12px 16px;background:linear-gradient(135deg,#FFFBEB,#FEF3C7);border-radius:16px;border:1px solid #FDE68A;display:flex;flex-wrap:wrap;gap:12px;font-size:12px;font-weight:700;';
+      adminStats.innerHTML = `
         <div style="display:flex;align-items:center;gap:6px;"><span>📌</span> Pinterest থেকে মোট <span style="color:#E11D48;">${totalPinterest}</span> জন এসেছে</div>
         <div style="display:flex;align-items:center;gap:6px;"><span>➡️</span> Amazon এ মোট <span style="color:#D97706;">${totalAmazon}</span> জন গেছে</div>
         <div style="display:flex;align-items:center;gap:6px;"><span>❤️</span> মোট <span style="color:#FF4B7A;">${totalLikes}</span> লাইক</div>
         <div style="display:flex;align-items:center;gap:6px;"><span>👁️</span> মোট <span style="color:#16A34A;">${totalViews}</span> ভিউ</div>
+        <div style="width:100%;font-size:10px;color:#9A7BA8;margin-top:4px;">এডমিন অনলি - পাবলিক দেখতে পাবে না</div>
       `;
-      // Insert after banner
-      var banner = document.querySelector('.relative.w-full.h-\[72px\]') || document.querySelector('h2');
-      if(banner && banner.parentNode && banner.parentNode.parentNode){
-        banner.parentNode.parentNode.insertBefore(globalStats, banner.parentNode.nextSibling);
-      } else if(shopContainer.firstChild){
-        shopContainer.insertBefore(globalStats, shopContainer.firstChild);
+      // Insert at top of admin panel content
+      if(adminPanel.firstChild){
+        adminPanel.insertBefore(adminStats, adminPanel.firstChild.nextSibling || adminPanel.firstChild);
+      } else {
+        adminPanel.appendChild(adminStats);
       }
     }
+    // Initial call and periodic
+    setTimeout(renderAdminGlobalStats, 1200);
+    setTimeout(renderAdminGlobalStats, 3000);
+
   }
 
   // Run setup after page loads
@@ -998,9 +1032,7 @@ Message: ${d.message}`),className:"mt-4 text-[11px] card-white px-4 py-2 rounded
       document.head.appendChild(styleTag);
     }
     
-    setTimeout(setupAnalytics, 1000);
-    setTimeout(setupAnalytics, 2500);
-    setTimeout(setupAnalytics, 4000);
+    setTimeout(setupAnalytics, 900);
   }
 
   if(document.readyState === 'loading'){
@@ -1009,22 +1041,20 @@ Message: ${d.message}`),className:"mt-4 text-[11px] card-white px-4 py-2 rounded
     init();
   }
 
-  // Re-run when hash changes or new products loaded (React)
-  var lastHash = window.location.hash;
-  setInterval(function(){
-    if(window.location.hash !== lastHash){
-      lastHash = window.location.hash;
-      setTimeout(setupAnalytics, 800);
-    }
-  }, 1000);
+  // Re-run only when the hash actually changes (no one-second polling loop).
+  window.addEventListener('hashchange', function(){ setTimeout(setupAnalytics, 300); });
 
-  // MutationObserver for dynamically loaded products
+  // Debounce DOM updates so a batch of new products triggers one scan.
+  var analyticsTimer = null;
   var observer = new MutationObserver(function(mutations){
     var shouldRun = false;
     mutations.forEach(function(m){
       if(m.addedNodes && m.addedNodes.length > 0) shouldRun = true;
     });
-    if(shouldRun) setTimeout(setupAnalytics, 500);
+    if(shouldRun){
+      clearTimeout(analyticsTimer);
+      analyticsTimer = setTimeout(setupAnalytics, 180);
+    }
   });
   try {
     observer.observe(document.body, {childList: true, subtree: true});
@@ -1395,12 +1425,8 @@ Message: ${d.message}`),className:"mt-4 text-[11px] card-white px-4 py-2 rounded
 (function(){
   function isVideoSrc(src){
     if(!src) return false;
-    var s = String(src).toLowerCase();
-    if(s.indexOf('data:video')===0) return true;
-    if(s.indexOf('.mp4')>-1 || s.indexOf('.webm')>-1 || s.indexOf('.mov')>-1 || s.indexOf('.ogg')>-1) return true;
-    if(s.indexOf('firebasestorage.googleapis.com')>-1) return true;
-    if(s.indexOf('/videos/')>-1 || s.indexOf('videos%2f')>-1) return true;
-    return false;
+    var s = src.toLowerCase();
+    return s.indexOf('data:video')===0 || s.indexOf('.mp4')>-1 || s.indexOf('.webm')>-1 || s.indexOf('.mov')>-1 || s.indexOf('.ogg')>-1;
   }
 
   // 2. আপলোড বাটন থেকে ভিডিও আপলোড
@@ -1531,16 +1557,16 @@ Message: ${d.message}`),className:"mt-4 text-[11px] card-white px-4 py-2 rounded
     });
   }
 
-  // প্রথমবার
+  // Run once after initial render; debounce updates from React.
   setTimeout(runAll, 800);
-  setTimeout(runAll, 2000);
-  setTimeout(runAll, 3500);
-
-  // React re-render ধরার জন্য MutationObserver
+  var runAllTimer = null;
   var obs = new MutationObserver(function(mutations){
     var should = false;
     mutations.forEach(function(m){ if(m.addedNodes && m.addedNodes.length>0) should=true; });
-    if(should) setTimeout(runAll, 300);
+    if(should){
+      clearTimeout(runAllTimer);
+      runAllTimer = setTimeout(runAll, 180);
+    }
   });
   try { obs.observe(document.body, {childList:true, subtree:true}); } catch(e){}
 
@@ -1606,19 +1632,22 @@ Message: ${d.message}`),className:"mt-4 text-[11px] card-white px-4 py-2 rounded
         if(JSON.stringify(remote) !== localRaw){
           localStorage.setItem('alamgir_products', JSON.stringify(remote));
           console.log('✅ Public products loaded from GitHub:', remote.length);
-          // Reload once if visitor to show new posts
-          if(!isAdmin && local.length !== remote.length){
-            if(!sessionStorage.getItem('public_reloaded')){
-              sessionStorage.setItem('public_reloaded','1');
-              window.location.reload();
-            }
+          // Reload at most once per tab if the actual product data changed,
+          // including edits where the number of products stayed the same.
+          if(!isAdmin && !sessionStorage.getItem('public_reloaded')){
+            sessionStorage.setItem('public_reloaded','1');
+            window.location.reload();
           }
         }
       }
     }catch(e){ console.log('public loader failed', e); }
   }
-  setTimeout(loadPublic, 700);
-  setTimeout(loadPublic, 2500);
+  if(location.protocol === 'http:' || location.protocol === 'https:'){
+    // One request per page load; avoid duplicate network fetches.
+    setTimeout(loadPublic, 700);
+  } else {
+    console.info('Public products loader skipped for local file preview; open the site through its web host to load products.json.');
+  }
 })();
 </script>
 
@@ -1650,6 +1679,11 @@ Message: ${d.message}`),className:"mt-4 text-[11px] card-white px-4 py-2 rounded
     }catch(e){ console.log('sync error', e); }
     finally{ isSyncing=false; }
   }
+  // GitHub/Netlify sync requires a hosted HTTP(S) origin, not file://
+  if(location.protocol !== 'http:' && location.protocol !== 'https:'){
+    console.info('GitHub sync skipped for local file preview; deploy/serve the site over HTTP(S) to enable syncing.');
+    return;
+  }
   // Watch for product changes
   var lastProducts = localStorage.getItem('alamgir_products');
   setInterval(function(){
@@ -1673,86 +1707,10 @@ Message: ${d.message}`),className:"mt-4 text-[11px] card-white px-4 py-2 rounded
 <!-- FIX END -->
 
 
-
-<!-- FINAL VIDEO FIX V3 - LocalStorage Quota + Chunked Firestore - NO DESIGN CHANGE -->
-<script>
-// Global caches
-window.alamgirVideoCache = window.alamgirVideoCache || {};
-window._pendingVideoChunks = window._pendingVideoChunks || {};
-
-(function(){
-  const origSetItem = localStorage.setItem.bind(localStorage);
-  localStorage.setItem = function(key, value){
-    if(key === 'alamgir_products' && value && value.length > 500000){
-      try{
-        let arr;
-        try{ arr = JSON.parse(value); }catch(e){ return origSetItem(key, value); }
-        if(!Array.isArray(arr)) return origSetItem(key, value);
-        let hasLargeVideo = false;
-        let newArr = [];
-        for(let p of arr){
-          if(p && p.img && typeof p.img === 'string' && p.img.startsWith('data:video') && p.img.length > 800000){
-            hasLargeVideo = true;
-            const id = p.id || ('p_'+Date.now()+'_'+Math.random().toString(36).slice(2));
-            p.id = id;
-            const dataUrl = p.img;
-            const chunkSize = 750000;
-            const chunks = [];
-            for(let i=0;i<dataUrl.length;i+=chunkSize) chunks.push(dataUrl.slice(i,i+chunkSize));
-            window._pendingVideoChunks[id] = chunks;
-            window.alamgirVideoCache[id] = dataUrl;
-            console.log('📦 Large video detected, chunking', id, 'into', chunks.length, 'parts, original size', dataUrl.length);
-            newArr.push({...p, img: 'CHUNKED_VIDEO:'+id, _chunkCount: chunks.length, _isChunked: true});
-          } else if(p && p.img && typeof p.img === 'string' && p.img.startsWith('data:video') && p.img.length > 100000){
-            // medium video, keep but also cache
-            const id = p.id;
-            if(id) window.alamgirVideoCache[id] = p.img;
-            newArr.push(p);
-          } else {
-            newArr.push(p);
-          }
-        }
-        if(hasLargeVideo){
-          const smallJson = JSON.stringify(newArr);
-          console.log('✅ Saved chunked version to localStorage, size', smallJson.length, 'vs original', value.length);
-          return origSetItem(key, smallJson);
-        }
-      }catch(e){
-        console.log('localStorage chunk handling error', e);
-      }
-    }
-    try{
-      return origSetItem(key, value);
-    }catch(e){
-      if(e.name === 'QuotaExceededError' || e.code === 22 || e.message.includes('quota')){
-        console.warn('❌ QuotaExceededError, trying to save reduced version');
-        try{
-          let arr = JSON.parse(value);
-          if(Array.isArray(arr)){
-            // remove oldest large media to fit
-            let reduced = arr.map(p=>{
-              if(p.img && p.img.length > 200000){
-                return {...p, img: p.img.substring(0,50000)+'...'};
-              }
-              return p;
-            });
-            return origSetItem(key, JSON.stringify(reduced));
-          }
-        }catch(err){}
-        alert('Storage full! Please delete some old posts with videos. Browser limit reached.');
-      }
-      throw e;
-    }
-  };
-  console.log('✅ LocalStorage quota patch applied');
-})();
-</script>
-<!-- FINAL FIX V3 PART 1 END -->
-
-<!-- FIREBASE LIVE SYNC - FIXED NO RELOAD + VIDEO CHUNKED (NO BLAZE NEEDED) -->
+<!-- FIREBASE LIVE SYNC - FIXED NO RELOAD LOOP - DOES NOT CHANGE DESIGN -->
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getFirestore, collection, doc, setDoc, getDocs, onSnapshot, deleteDoc, query, where } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getFirestore, collection, doc, setDoc, getDocs, onSnapshot, deleteDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyDBjWvZcQog7nKDDPSS80nzzDO-tO6lI",
@@ -1767,116 +1725,35 @@ try {
   const app = initializeApp(firebaseConfig);
   const db = getFirestore(app);
   const colRef = collection(db, "tiny-hacks-posts");
-  const chunkColRef = collection(db, "tiny-hacks-video-chunks");
-  console.log("🔥 Firebase Live Connected - Chunked Video Mode (Spark Free)");
+  console.log("🔥 Firebase Live Connected - No Reload Mode");
 
   let isInitialLoad = true;
   let lastRemoteJson = null;
 
-  async function getVideoDataFromChunks(postId){
-    try{
-      const q = query(chunkColRef, where("postId", "==", postId));
-      const snap = await getDocs(q);
-      if(snap.empty) return null;
-      const chunks = [];
-      snap.forEach(d=>{
-        const data = d.data();
-        chunks[data.index] = data.data;
-      });
-      if(chunks.length===0) return null;
-      const joined = chunks.join("");
-      return joined;
-    }catch(e){ console.log("chunk fetch error", e); return null; }
-  }
-
+  // Load from Firebase without reload
   async function applyRemoteProducts(remoteProducts, source){
     if(!remoteProducts || remoteProducts.length===0) return;
-    // Reassemble chunked videos and cache them
-    for(let p of remoteProducts){
-      if(p.img && typeof p.img === 'string' && p.img.startsWith('CHUNKED_VIDEO:')){
-        const postId = p.img.replace('CHUNKED_VIDEO:','').trim();
-        console.log('🔧 Reassembling video for', postId);
-        const videoData = await getVideoDataFromChunks(postId);
-        if(videoData){
-          // Cache full video in memory, but keep marker in localStorage to avoid quota
-          window.alamgirVideoCache[postId] = videoData;
-          // Keep marker for localStorage, but we will inject actual video in DOM via cache
-          // For immediate display, temporarily set full data, but localStorage will get marker version
-          p._hasCachedVideo = true;
-          // For UI, we need full data in this session, so keep it for now in remoteProducts for dispatch
-          // The localStorage version will be marker-only (handled below)
-        }
-      }
-    }
-
     remoteProducts.sort((a,b)=> (b.createdAt||0)-(a.createdAt||0));
-    
-    // For localStorage, save marker version (small) to avoid quota error
-    let forLocalStorage = remoteProducts.map(p=>{
-      if(p.img && p.img.startsWith('CHUNKED_VIDEO:')){
-        return p; // already marker
-      }
-      if(p._hasCachedVideo){
-        // p.img was reassembled? Actually we kept marker, so need to check cache case
-        // If we reassembled above, p.img would be full data - convert back to marker for storage
-        if(p.img && p.img.startsWith('data:video')){
-          const postId = p.id;
-          if(window.alamgirVideoCache[postId]){
-            return {...p, img: 'CHUNKED_VIDEO:'+postId};
-          }
-        }
-      }
-      return p;
-    });
-    
-    // If any product was reassembled to full data, we need full version for UI dispatch
-    let forUI = remoteProducts.map(p=>{
-      if(p.img && p.img.startsWith('CHUNKED_VIDEO:')){
-        const postId = p.img.replace('CHUNKED_VIDEO:','').trim();
-        if(window.alamgirVideoCache[postId]){
-          return {...p, img: window.alamgirVideoCache[postId]};
-        }
-      }
-      if(p._hasCachedVideo && window.alamgirVideoCache[p.id]){
-        return {...p, img: window.alamgirVideoCache[p.id]};
-      }
-      return p;
-    });
-    
-    const jsonForStorage = JSON.stringify(forLocalStorage);
-    const jsonForUI = JSON.stringify(forUI);
-    
-    if(jsonForStorage === lastRemoteJson) return;
-    if(jsonForStorage === localStorage.getItem('alamgir_products')) {
-      lastRemoteJson = jsonForStorage;
-      // Still dispatch UI with full video
-      const storageEvent = new StorageEvent('storage', {key:'alamgir_products', newValue: jsonForUI});
-      window.dispatchEvent(storageEvent);
-      setTimeout(()=>{
-        window.dispatchEvent(new Event('alamgir_products_updated'));
-        if(window.runAll) window.runAll();
-      }, 300);
+    const json = JSON.stringify(remoteProducts);
+    if(json === lastRemoteJson) return; // already applied
+    if(json === localStorage.getItem('alamgir_products')) {
+      lastRemoteJson = json;
       return;
     }
-    lastRemoteJson = jsonForStorage;
-    try{
-      localStorage.setItem('alamgir_products', jsonForStorage);
-    }catch(e){ console.log('localStorage save error in apply', e); }
-    console.log(`✅ Live posts from Firebase (${source}):`, remoteProducts.length, 'storage size', jsonForStorage.length, 'UI size', jsonForUI.length);
-    window.dispatchEvent(new StorageEvent('storage', {key:'alamgir_products', newValue: jsonForUI}));
-    setTimeout(()=>{
-      window.dispatchEvent(new Event('alamgir_products_updated'));
-      if(window.runAll) window.runAll();
-    }, 300);
-  
+    lastRemoteJson = json;
+    localStorage.setItem('alamgir_products', json);
     console.log(`✅ Live posts from Firebase (${source}):`, remoteProducts.length);
+    // Trigger UI update without reload
     window.dispatchEvent(new StorageEvent('storage', {key:'alamgir_products', newValue: json}));
+    // Also trigger custom event for React
     setTimeout(()=>{
       window.dispatchEvent(new Event('alamgir_products_updated'));
+      // Force re-render by touching DOM if needed
       if(window.runAll) window.runAll();
     }, 300);
   }
 
+  // Initial load
   async function loadFromFirebaseLive(){
     try{
       const snap = await getDocs(colRef);
@@ -1885,6 +1762,7 @@ try {
         snap.forEach(d => { remoteProducts.push(d.data()); });
         await applyRemoteProducts(remoteProducts, 'initial');
       } else {
+        // Seed only once
         const localRaw = localStorage.getItem('alamgir_products');
         if(localRaw && !localStorage.getItem('firebase_seeded')){
           try{
@@ -1894,18 +1772,7 @@ try {
               localStorage.setItem('firebase_seeded','1');
               for(const p of localArr){
                 const id = p.id || ('p_'+Date.now()+'_'+Math.random().toString(36).slice(2));
-                // Don't seed huge videos as is, chunk them
-                let toSave = {...p, id, createdAt: p.createdAt||Date.now()};
-                if(toSave.img && toSave.img.length > 900000 && toSave.img.startsWith('data:video')){
-                  const chunks = [];
-                  const chunkSize = 800000;
-                  for(let i=0;i<toSave.img.length;i+=chunkSize) chunks.push(toSave.img.slice(i,i+chunkSize));
-                  for(let idx=0; idx<chunks.length; idx++){
-                    await setDoc(doc(chunkColRef, id+"_"+idx), {postId: id, index: idx, data: chunks[idx], total: chunks.length});
-                  }
-                  toSave.img = "CHUNKED_VIDEO:"+id;
-                }
-                await setDoc(doc(colRef, id), toSave);
+                await setDoc(doc(colRef, id), {...p, id, createdAt: p.createdAt||Date.now()});
               }
             }
           }catch(e){ console.log("seed error", e); }
@@ -1914,21 +1781,22 @@ try {
     }catch(e){ console.log("Firebase load error", e); }
   }
 
+  // Real-time listener - NO RELOAD, just update storage
   try{
-    onSnapshot(colRef, async (snapshot)=>{
+    onSnapshot(colRef, (snapshot)=>{
       if(isInitialLoad){
         isInitialLoad = false;
-        return;
+        return; // skip first snapshot to avoid double load
       }
       const remoteProducts = [];
       snapshot.forEach(d => remoteProducts.push(d.data()));
       if(remoteProducts.length>0){
-        await applyRemoteProducts(remoteProducts, 'live');
+        applyRemoteProducts(remoteProducts, 'live');
       }
     });
   }catch(e){ console.log("onSnapshot error", e); }
 
-  // Push to Firebase with chunk handling - FINAL V3
+  // Push to Firebase when admin saves
   let lastPushed = localStorage.getItem('alamgir_products');
   setInterval(async ()=>{
     try{
@@ -1936,68 +1804,22 @@ try {
       if(!isAdmin) return;
       const current = localStorage.getItem('alamgir_products');
       if(!current || current===lastPushed) return;
-      // Check if current is actually same content as lastPushed (after chunking, size differs but we still want to push pending chunks)
-      // Always attempt to push if there are pending chunks
-      const hasPending = window._pendingVideoChunks && Object.keys(window._pendingVideoChunks).length > 0;
-      if(current===lastPushed && !hasPending) return;
-      
       lastPushed = current;
-      let arr;
-      try{ arr = JSON.parse(current); }catch(e){ console.log('parse error', e); return; }
-      
+      const arr = JSON.parse(current);
       const existing = await getDocs(colRef);
       const currentIds = new Set(arr.map(p=>p.id));
       for(const d of existing.docs){
         if(!currentIds.has(d.id)){
           await deleteDoc(doc(colRef, d.id));
-          try{
-            const q = query(chunkColRef, where("postId", "==", d.id));
-            const chunkSnap = await getDocs(q);
-            for(const cd of chunkSnap.docs) await deleteDoc(doc(chunkColRef, cd.id));
-          }catch(e){}
         }
       }
       for(const p of arr){
         const id = p.id;
         if(!id) continue;
-        let toSave = {...p, id, createdAt: p.createdAt||Date.now()};
-        
-        // If this post has pending chunks from localStorage override
-        if(window._pendingVideoChunks && window._pendingVideoChunks[id]){
-          const chunks = window._pendingVideoChunks[id];
-          console.log('📦 Uploading pending video chunks for', id, chunks.length);
-          try{
-            const q = query(chunkColRef, where("postId", "==", id));
-            const oldSnap = await getDocs(q);
-            for(const od of oldSnap.docs) await deleteDoc(doc(chunkColRef, od.id));
-          }catch(e){}
-          for(let idx=0; idx<chunks.length; idx++){
-            await setDoc(doc(chunkColRef, id+"_"+idx), {postId: id, index: idx, data: chunks[idx], total: chunks.length});
-          }
-          toSave.img = "CHUNKED_VIDEO:"+id;
-          delete window._pendingVideoChunks[id];
-          console.log('✅ Pending video chunks uploaded', id);
-        }
-        // Also handle if toSave still has large data:video (fallback)
-        else if(toSave.img && typeof toSave.img === 'string' && toSave.img.startsWith('data:video') && toSave.img.length > 800000){
-          console.log('📦 Chunking large video on push', id, toSave.img.length);
-          const chunkSize = 750000;
-          const chunks = [];
-          for(let i=0;i<toSave.img.length;i+=chunkSize) chunks.push(toSave.img.slice(i,i+chunkSize));
-          try{
-            const q = query(chunkColRef, where("postId", "==", id));
-            const oldSnap = await getDocs(q);
-            for(const od of oldSnap.docs) await deleteDoc(doc(chunkColRef, od.id));
-          }catch(e){}
-          for(let idx=0; idx<chunks.length; idx++){
-            await setDoc(doc(chunkColRef, id+"_"+idx), {postId: id, index: idx, data: chunks[idx], total: chunks.length});
-          }
-          toSave.img = "CHUNKED_VIDEO:"+id;
-        }
-        await setDoc(doc(colRef, id), toSave, {merge:true});
+        await setDoc(doc(colRef, id), {...p, id, createdAt: p.createdAt||Date.now()}, {merge:true});
       }
-      lastRemoteJson = current; // prevent reload loop
-      console.log("✅ Pushed to Firebase Live (V3 - chunked ready)");
+      lastRemoteJson = current;
+      console.log("✅ Pushed to Firebase Live");
     }catch(e){ console.log("push error", e); }
   }, 3000);
 
@@ -2009,234 +1831,366 @@ try {
 <!-- FIREBASE LIVE END -->
 
 
-
-
-<!-- INJECT CACHED VIDEOS INTO DOM - FINAL V3 -->
-<script>
-(function(){
-  function injectCachedVideos(){
-    document.querySelectorAll('.card-white').forEach(function(card){
-      // find img that is marker
-      var imgs = card.querySelectorAll('img');
-      imgs.forEach(function(img){
-        var src = img.getAttribute('src') || '';
-        if(src.startsWith('CHUNKED_VIDEO:')){
-          var postId = src.replace('CHUNKED_VIDEO:','').trim();
-          var cached = window.alamgirVideoCache && window.alamgirVideoCache[postId];
-          if(cached){
-            // replace with video
-            if(img.dataset.videoInjected) return;
-            img.dataset.videoInjected='1';
-            var video = document.createElement('video');
-            video.src = cached;
-            video.controls = true;
-            video.playsInline = true;
-            video.preload = 'metadata';
-            video.className = 'alamgir-video';
-            video.style.width='100%';
-            video.style.height='auto';
-            video.style.display='block';
-            img.parentNode.replaceChild(video, img);
-            console.log('✅ Injected cached video for', postId);
-          } else {
-            // try to fetch from Firestore if not cached yet
-            if(img.dataset.fetching) return;
-            img.dataset.fetching='1';
-            img.alt = 'Loading video...';
-          }
-        }
-      });
-      // Also handle video elements that have marker as src (should not happen)
-      var vids = card.querySelectorAll('video');
-      vids.forEach(function(v){
-        var src = v.getAttribute('src') || '';
-        if(src.startsWith('CHUNKED_VIDEO:')){
-          var postId = src.replace('CHUNKED_VIDEO:','').trim();
-          var cached = window.alamgirVideoCache && window.alamgirVideoCache[postId];
-          if(cached) v.src = cached;
-        }
-      });
-    });
+<!-- COMPATIBILITY + MEDIA LIGHTBOX PATCH: preserves existing card/image dimensions -->
+<style id="media-lightbox-patch">
+  .media-viewer-overlay {
+    position: fixed; inset: 0; z-index: 2147483647;
+    display: none; align-items: center; justify-content: center;
+    padding: 20px; background: rgba(15, 10, 20, .92);
+    -webkit-backdrop-filter: blur(5px); backdrop-filter: blur(5px);
   }
-  setInterval(injectCachedVideos, 1500);
-  setTimeout(injectCachedVideos, 1000);
-  console.log('✅ Cached video injector ready');
-})();
-</script>
-<!-- INJECT END -->
-
-
-<!-- VIDEO FAST LOAD OPTIMIZATION V4 - Lazy + Blob URL + Spinner -->
-<style id="alamgir-video-fast-style">
-.alamgir-video-wrapper{position:relative;width:100%;background:#f3f4f6;border-radius:12px;overflow:hidden;min-height:180px;display:flex;align-items:center;justify-content:center;}
-.alamgir-video-spinner{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);z-index:2;display:flex;flex-direction:column;align-items:center;gap:8px;color:#2d6a4f;font-weight:700;font-size:12px;}
-.alamgir-video-spinner .spinner{width:32px;height:32px;border:3px solid #d1fae5;border-top-color:#2d6a4f;border-radius:50%;animation:spin 0.8s linear infinite;}
-@keyframes spin{to{transform:rotate(360deg);}}
-.alamgir-video{width:100%;height:auto;display:block;background:black;}
-.alamgir-video-play-btn{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:60px;height:60px;background:rgba(45,106,79,0.9);border-radius:50%;display:flex;align-items:center;justify-content:center;color:white;font-size:24px;cursor:pointer;z-index:3;border:none;box-shadow:0 4px 12px rgba(0,0,0,0.3);}
-.alamgir-video-play-btn:hover{background:#2d6a4f;transform:translate(-50%,-50%) scale(1.05);}
+  .media-viewer-overlay.is-open { display: flex; }
+  .media-viewer-content {
+    position: relative; display: flex; align-items: center; justify-content: center;
+    max-width: 96vw; max-height: 92vh; width: auto; height: auto;
+  }
+  .media-viewer-content img, .media-viewer-content video {
+    display: block; max-width: 96vw; max-height: 88vh;
+    width: auto; height: auto; object-fit: contain; margin: auto;
+    background: #111;
+  }
+  .media-viewer-close {
+    position: fixed; top: max(12px, env(safe-area-inset-top));
+    right: max(12px, env(safe-area-inset-right)); z-index: 1;
+    width: 44px; height: 44px; border: 2px solid #fff; border-radius: 50%;
+    color: #fff; background: rgba(0,0,0,.72); font: 700 28px/1 Arial, sans-serif;
+    display: flex; align-items: center; justify-content: center; cursor: pointer;
+    -webkit-appearance: none; appearance: none;
+  }
+  .media-viewer-close:focus-visible { outline: 3px solid #ff6a88; outline-offset: 3px; }
+  @media (max-width: 600px) {
+    .media-viewer-overlay { padding: 10px; }
+    .media-viewer-content img, .media-viewer-content video { max-width: 96vw; max-height: 84vh; }
+  }
 </style>
-<script>
-(function(){
-  function dataURLToBlob(dataURL){
-    try{
-      const parts = dataURL.split(',');
-      const mimeMatch = parts[0].match(/:(.*?);/);
-      const mime = mimeMatch ? mimeMatch[1] : 'video/mp4';
-      const isBase64 = parts[0].indexOf('base64') !== -1;
-      let byteString;
-      if(isBase64){
-        byteString = atob(parts[1]);
-      }else{
-        byteString = decodeURIComponent(parts[1]);
-      }
-      const ab = new ArrayBuffer(byteString.length);
-      const ia = new Uint8Array(ab);
-      for(let i=0;i<byteString.length;i++) ia[i]=byteString.charCodeAt(i);
-      return new Blob([ab], {type: mime});
-    }catch(e){ console.log('blob convert error', e); return null; }
+<script id="media-lightbox-patch-script">
+(function () {
+  'use strict';
+  if (window.__mediaViewerPatchInstalled) return;
+  window.__mediaViewerPatchInstalled = true;
+
+  var overlay = document.createElement('div');
+  overlay.className = 'media-viewer-overlay';
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
+  overlay.setAttribute('aria-label', 'Media viewer');
+  overlay.innerHTML = '<button type="button" class="media-viewer-close" aria-label="Close media viewer" title="Close">×</button><div class="media-viewer-content"></div>';
+  document.body.appendChild(overlay);
+
+  var content = overlay.querySelector('.media-viewer-content');
+  var closeButton = overlay.querySelector('.media-viewer-close');
+  var activeVideo = null;
+  var previousFocus = null;
+
+  function openMedia(source, type, alt) {
+    if (!source) return;
+    previousFocus = document.activeElement;
+    content.replaceChildren();
+    if (activeVideo) { try { activeVideo.pause(); } catch (e) {} }
+    activeVideo = null;
+
+    var media;
+    if (type === 'video') {
+      media = document.createElement('video');
+      media.controls = true;
+      media.autoplay = true;
+      media.playsInline = true;
+      media.setAttribute('playsinline', '');
+      media.setAttribute('webkit-playsinline', '');
+      media.preload = 'metadata';
+      media.src = source;
+      activeVideo = media;
+      media.addEventListener('loadedmetadata', function () {
+        var promise = media.play();
+        if (promise && typeof promise.catch === 'function') promise.catch(function () {});
+      }, { once: true });
+    } else {
+      media = document.createElement('img');
+      media.alt = alt || 'Expanded image';
+      media.decoding = 'async';
+      media.src = source;
+    }
+    content.appendChild(media);
+    overlay.classList.add('is-open');
+    document.body.style.overflow = 'hidden';
+    closeButton.focus({ preventScroll: true });
+    if (type === 'video') {
+      var playPromise = media.play();
+      if (playPromise && typeof playPromise.catch === 'function') playPromise.catch(function () {});
+    }
   }
 
-  function createFastVideoElement(dataURL, postId){
-    const wrapper = document.createElement('div');
-    wrapper.className = 'alamgir-video-wrapper';
-    wrapper.dataset.postId = postId;
+  function closeMedia() {
+    if (!overlay.classList.contains('is-open')) return;
+    if (activeVideo) {
+      try { activeVideo.pause(); activeVideo.removeAttribute('src'); activeVideo.load(); } catch (e) {}
+    }
+    activeVideo = null;
+    content.replaceChildren();
+    overlay.classList.remove('is-open');
+    document.body.style.overflow = '';
+    if (previousFocus && typeof previousFocus.focus === 'function') {
+      try { previousFocus.focus({ preventScroll: true }); } catch (e) { previousFocus.focus(); }
+    }
+  }
 
-    const spinner = document.createElement('div');
-    spinner.className = 'alamgir-video-spinner';
-    spinner.innerHTML = '<div class="spinner"></div><div>Loading video...</div>';
-    wrapper.appendChild(spinner);
+  closeButton.addEventListener('click', closeMedia);
+  overlay.addEventListener('click', function (event) {
+    if (event.target === overlay) closeMedia();
+  });
+  document.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape') closeMedia();
+  });
 
-    const video = document.createElement('video');
-    video.className = 'alamgir-video';
-    video.controls = true;
-    video.playsInline = true;
-    video.preload = 'metadata';
-    video.style.display = 'none';
+  function isShopButton(anchor) {
+    if (!anchor) return false;
+    var label = (anchor.innerText || anchor.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    return label === 'shop on amazon' || label === 'shop on amazon ↗';
+  }
 
-    // Try Blob URL for faster loading
-    try{
-      const blob = dataURLToBlob(dataURL);
-      if(blob){
-        const blobUrl = URL.createObjectURL(blob);
-        video.src = blobUrl;
-        video.dataset.blobUrl = blobUrl;
-        console.log('✅ Blob URL created for', postId, 'size', blob.size);
-      }else{
-        video.src = dataURL;
+  // Capture before existing handlers: media opens in a viewer, never follows its parent link.
+  document.addEventListener('click', function (event) {
+    var target = event.target;
+    if (!(target instanceof Element)) return;
+
+    var video = target.closest('video');
+    if (video) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (typeof event.stopImmediatePropagation === 'function') event.stopImmediatePropagation();
+      var videoSource = video.currentSrc || video.src || video.querySelector('source')?.src;
+      if (videoSource) openMedia(videoSource, 'video', '');
+      else if (video.querySelector('source')) {
+        var sourceEl = video.querySelector('source');
+        if (sourceEl.src) openMedia(sourceEl.src, 'video', '');
       }
-    }catch(e){
-      video.src = dataURL;
+      return;
     }
 
-    video.addEventListener('loadeddata', function(){
-      spinner.style.display='none';
-      video.style.display='block';
-      console.log('✅ Video loaded', postId);
-    });
-    video.addEventListener('canplay', function(){
-      spinner.style.display='none';
-      video.style.display='block';
-    });
-    video.addEventListener('error', function(){
-      spinner.innerHTML = '<div>❌ Failed to load</div>';
-      console.log('❌ Video error', postId);
-    });
+    var img = target.closest('img');
+    if (img) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (typeof event.stopImmediatePropagation === 'function') event.stopImmediatePropagation();
+      var imageSource = img.currentSrc || img.src || img.getAttribute('src');
+      if (imageSource) openMedia(imageSource, 'image', img.alt);
+      return;
+    }
 
-    const playBtn = document.createElement('button');
-    playBtn.className = 'alamgir-video-play-btn';
-    playBtn.innerHTML = '▶️';
-    playBtn.onclick = function(){
-      playBtn.style.display='none';
-      video.style.display='block';
-      video.play().catch(()=>{});
-    };
+    var anchor = target.closest('a');
+    if (anchor && !isShopButton(anchor)) {
+      // All non-Shop links are inert; only the specifically labelled Amazon CTA may navigate.
+      event.preventDefault();
+      event.stopPropagation();
+      if (typeof event.stopImmediatePropagation === 'function') event.stopImmediatePropagation();
+    }
+  }, true);
 
-    wrapper.appendChild(video);
-    wrapper.appendChild(playBtn);
-    
-    // Auto show after 1s if not loaded (fallback)
-    setTimeout(()=>{
-      if(video.readyState >= 1){
-        spinner.style.display='none';
-        video.style.display='block';
-      }
-    }, 2000);
-
-    return wrapper;
-  }
-
-  // Override the previous inject function with faster version
-  window.alamgirCreateFastVideo = createFastVideoElement;
-
-  // Also optimize the cache injector
-  const origInjectInterval = setInterval(function(){
-    // Clean up old blob URLs to free memory
-  }, 10000);
-
-  console.log('✅ Fast video loader V4 ready - Blob URL + Lazy');
+  // Keep image layout unchanged while providing a clear fallback when a remote image is truly unavailable.
+  document.addEventListener('error', function (event) {
+    var img = event.target;
+    if (!(img instanceof HTMLImageElement) || img.dataset.mediaFallbackApplied === '1') return;
+    img.dataset.mediaFallbackApplied = '1';
+    img.alt = img.alt || 'Image unavailable';
+    img.style.backgroundColor = '#f7edf3';
+    img.style.objectFit = img.style.objectFit || 'contain';
+    img.title = 'This image could not be loaded. Check the image URL or network connection.';
+  }, true);
 })();
 </script>
 
-<script>
+
+<!-- Final placement guard: analytics only belongs to real product cards with media. -->
+<style id="analytics-placement-guard">
+/* Never show product-description toggles inside the Admin/settings form. */
+#admin-panel .btn-product-desc-3d,
+.admin-panel .btn-product-desc-3d,
+[aria-label*="Admin Panel"] .btn-product-desc-3d,
+.admin-settings .btn-product-desc-3d { display:none !important; }
+</style>
+<script id="analytics-placement-guard-script">
 (function(){
-  // Patch the previous injectCachedVideos to use fast loader
-  function injectFastVideos(){
-    document.querySelectorAll('.card-white').forEach(function(card){
-      var imgs = card.querySelectorAll('img');
-      imgs.forEach(function(img){
-        var src = img.getAttribute('src') || '';
-        if(src.startsWith('CHUNKED_VIDEO:')){
-          var postId = src.replace('CHUNKED_VIDEO:','').trim();
-          var cached = window.alamgirVideoCache && window.alamgirVideoCache[postId];
-          if(cached && !img.dataset.fastInjected){
-            img.dataset.fastInjected='1';
-            var fastEl = window.alamgirCreateFastVideo ? window.alamgirCreateFastVideo(cached, postId) : null;
-            if(fastEl){
-              img.parentNode.replaceChild(fastEl, img);
-              console.log('✅ Fast injected video for', postId);
-            }
-          }
-        } else if(src.startsWith('data:video') && src.length > 500000 && !img.dataset.fastInjected){
-          // Direct data:video large - also convert to fast
-          img.dataset.fastInjected='1';
-          var postId = img.closest('.card-white') ? 'direct_'+Math.random().toString(36).slice(2) : 'direct';
-          var fastEl = window.alamgirCreateFastVideo ? window.alamgirCreateFastVideo(src, postId) : null;
-          if(fastEl){
-            img.parentNode.replaceChild(fastEl, img);
-          }
-        }
-      });
-      // Also patch existing video tags that are data:video
-      var vids = card.querySelectorAll('video.alamgir-video');
-      vids.forEach(function(v){
-        var src = v.getAttribute('src') || '';
-        if(src.startsWith('data:video') && src.length > 500000 && !v.dataset.blobConverted){
-          v.dataset.blobConverted='1';
-          try{
-            const parts = src.split(',');
-            const mimeMatch = parts[0].match(/:(.*?);/);
-            const mime = mimeMatch ? mimeMatch[1] : 'video/mp4';
-            const byteString = atob(parts[1]);
-            const ab = new ArrayBuffer(byteString.length);
-            const ia = new Uint8Array(ab);
-            for(let i=0;i<byteString.length;i++) ia[i]=byteString.charCodeAt(i);
-            const blob = new Blob([ab], {type: mime});
-            const blobUrl = URL.createObjectURL(blob);
-            v.src = blobUrl;
-            v.dataset.blobUrl = blobUrl;
-            console.log('✅ Converted existing video to blob URL');
-          }catch(e){}
-        }
-      });
-    });
+  function isAdminArea(el){
+    if(!el) return false;
+    var n=el;
+    for(var i=0;i<7 && n;i++,n=n.parentElement){
+      var id=(n.id||'').toLowerCase();
+      var cls=(typeof n.className==='string'?n.className:'').toLowerCase();
+      var txt=(n.innerText||'').slice(0,500).toLowerCase();
+      if(id.includes('admin') || cls.includes('admin-panel') || cls.includes('admin-settings') ||
+         (txt.includes('admin edit mode') && (txt.includes('product image') || txt.includes('logout admin')))) return true;
+    }
+    return false;
   }
-  setInterval(injectFastVideos, 1200);
-  setTimeout(injectFastVideos, 800);
-  setTimeout(injectFastVideos, 2500);
+  function hasMedia(card){
+    var media=card.querySelector('img, video');
+    if(!media) return false;
+    if(media.tagName==='IMG') return !!(media.currentSrc || media.getAttribute('src') || media.getAttribute('data-src'));
+    return !!(media.currentSrc || media.getAttribute('src') || media.querySelector('source[src]'));
+  }
+  function enforce(){
+    // Product Description control is only for product cards, never admin forms.
+    document.querySelectorAll('.btn-product-desc-3d').forEach(function(btn){
+      if(isAdminArea(btn)) btn.remove();
+    });
+    // Remove injected analytics from admin UI and generic/non-media cards.
+    document.querySelectorAll('.product-analytics-bar, .pinterest-badge, .amazon-badge, .comment-box').forEach(function(el){
+      var card=el.closest('.card-white') || el.closest('[data-analytics-setup]') || el.parentElement;
+      if(isAdminArea(el) || !card || !hasMedia(card)) el.remove();
+    });
+    // Global aggregate analytics banner was being added to unrelated page areas.
+    var globalStats=document.getElementById('global-analytics-stats');
+    if(globalStats) globalStats.remove();
+  }
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',enforce);
+  else enforce();
+  var timer;
+  new MutationObserver(function(){clearTimeout(timer);timer=setTimeout(enforce,120);})
+    .observe(document.documentElement,{childList:true,subtree:true});
 })();
 </script>
-<!-- FAST LOAD V4 END -->
+
+
+<style id="route-guard-fix">
+/* 1 নং হলুদ বার পাবলিক থেকে সম্পূর্ণ লুকানো - শুধু এডমিন প্যানেলে থাকবে */
+#global-analytics-stats { display:none !important; }
+#admin-only-global-stats { display:flex !important; }
+/* যদি কেউ এডমিন না হয়, এডমিন স্ট্যাটস ও লুকানো */
+body:not(.admin-authenticated) #admin-only-global-stats { display:none !important; }
+
+/* 2 নং Shop Finds সেকশন শুধু shop রাউটে দেখাবে, অন্য রাউটে লুকানো */
+/* JS দিয়ে কন্ট্রোল করা হবে, CSS fallback */
+body.route-signup #page-shop,
+body.route-login #page-shop,
+body.route-contact #page-shop,
+body.route-about #page-shop,
+body.route-before #page-shop {
+  display:none !important;
+}
+</style>
+
+
+<script id="route-guard-js">
+(function(){
+  function applyRouteGuard(){
+    var hash = (window.location.hash || '').toLowerCase().replace('#','');
+    // Normalize
+    var route = hash.split('?')[0].split('&')[0];
+    // Remove previous route classes
+    document.body.classList.remove('route-shop','route-signup','route-login','route-contact','route-about','route-before');
+    if(!route || route === 'shop' || route === '') {
+      document.body.classList.add('route-shop');
+    } else {
+      document.body.classList.add('route-' + route);
+    }
+    // Hide page-shop on non-shop routes
+    var shopPage = document.getElementById('page-shop');
+    if(shopPage){
+      if(['signup','login','contact','about','before'].includes(route)){
+        shopPage.style.display = 'none';
+      } else {
+        shopPage.style.display = '';
+      }
+    }
+    // Also ensure any duplicate Shop Finds header that might be outside page-shop is hidden on those routes
+    // (safety: if some script injected it elsewhere)
+    var allH2 = document.querySelectorAll('h2');
+    allH2.forEach(function(h){
+      if((h.textContent||'').includes('Shop Finds - Amazon Organization Products')){
+        var container = h.closest('#page-shop') || h.closest('.card-white.rounded-\[24px\].p-5');
+        // If this h2 is NOT inside page-shop and we are on non-shop route, hide its card
+        if(!h.closest('#page-shop') && ['signup','login','contact','about','before'].includes(route)){
+          var card = h.closest('.card-white');
+          if(card) card.style.display = 'none';
+        } else if(h.closest('#page-shop')){
+          // Already handled by shopPage hide
+        }
+      }
+    });
+    // Re-render admin stats when admin panel opens
+    try {
+      if(typeof renderAdminGlobalStats === 'function'){
+        // will be called via global scope? we re-define here
+      }
+      var isAdmin = sessionStorage.getItem('alamgir_admin_auth') === 'true' || localStorage.getItem('alamgir_admin_auth') === 'true';
+      if(isAdmin){
+        // Try to render admin stats
+        var adminPanelFound = false;
+        document.querySelectorAll('div').forEach(function(d){
+          if(d.textContent.includes('Admin Panel') && d.textContent.includes('Add new products')){
+            adminPanelFound = true;
+          }
+        });
+        if(adminPanelFound){
+          // call the function defined earlier if exists, else inline
+          var oldAdminStats = document.getElementById('admin-only-global-stats');
+          // If function exists in window scope, it will be called by its own timer; we just ensure visibility
+          if(oldAdminStats) oldAdminStats.style.display = 'flex';
+        }
+      }
+    } catch(e){}
+  }
+
+  // Run on load and hashchange
+  window.addEventListener('hashchange', function(){ setTimeout(applyRouteGuard, 150); });
+  document.addEventListener('DOMContentLoaded', function(){ setTimeout(applyRouteGuard, 500); });
+  setTimeout(applyRouteGuard, 800);
+  setTimeout(applyRouteGuard, 2000);
+
+  // Mutation observer to keep enforcing
+  var guardTimer = null;
+  new MutationObserver(function(){
+    clearTimeout(guardTimer);
+    guardTimer = setTimeout(applyRouteGuard, 200);
+  }).observe(document.documentElement, {childList:true, subtree:true});
+
+  // Expose for manual
+  window.applyRouteGuard = applyRouteGuard;
+})();
+</script>
+<script id="admin-stats-enforce">
+(function(){
+  function enforceAdminStats(){
+    try {
+      var isAdmin = sessionStorage.getItem('alamgir_admin_auth') === 'true' || localStorage.getItem('alamgir_admin_auth') === 'true';
+      var publicStats = document.getElementById('global-analytics-stats');
+      if(publicStats) publicStats.remove(); // Always remove public yellow bar
+      if(!isAdmin){
+        var adminStats = document.getElementById('admin-only-global-stats');
+        if(adminStats) adminStats.remove();
+      } else {
+        // If admin, ensure admin stats rendered
+        var adminPanel = null;
+        document.querySelectorAll('div').forEach(function(d){
+          if(!adminPanel && d.textContent.includes('Admin Panel') && d.textContent.includes('Add new products')){
+            adminPanel = d;
+          }
+        });
+        if(adminPanel && !document.getElementById('admin-only-global-stats')){
+          // Trigger render function from earlier script if available
+          var totalPinterest=0,totalAmazon=0,totalLikes=0,totalViews=0;
+          try{
+            for(var i=0;i<localStorage.length;i++){
+              var k=localStorage.key(i);
+              if(k && k.startsWith('pinterest_')) totalPinterest+=parseInt(localStorage.getItem(k)||'0');
+              if(k && k.startsWith('amazon_click_')) totalAmazon+=parseInt(localStorage.getItem(k)||'0');
+              if(k && k.startsWith('like_')) totalLikes+=parseInt(localStorage.getItem(k)||'0');
+              if(k && k.startsWith('view_')) totalViews+=parseInt(localStorage.getItem(k)||'0');
+            }
+          }catch(e){}
+          var div=document.createElement('div');
+          div.id='admin-only-global-stats';
+          div.style.cssText='margin:12px 0;padding:12px 16px;background:linear-gradient(135deg,#FFFBEB,#FEF3C7);border-radius:16px;border:1px solid #FDE68A;display:flex;flex-wrap:wrap;gap:12px;font-size:12px;font-weight:700;';
+          div.innerHTML='<div style="display:flex;align-items:center;gap:6px;"><span>📌</span> Pinterest থেকে মোট <span style="color:#E11D48;">'+totalPinterest+'</span> জন এসেছে</div><div style="display:flex;align-items:center;gap:6px;"><span>➡️</span> Amazon এ মোট <span style="color:#D97706;">'+totalAmazon+'</span> জন গেছে</div><div style="display:flex;align-items:center;gap:6px;"><span>❤️</span> মোট <span style="color:#FF4B7A;">'+totalLikes+'</span> লাইক</div><div style="display:flex;align-items:center;gap:6px;"><span>👁️</span> মোট <span style="color:#16A34A;">'+totalViews+'</span> ভিউ</div><div style="width:100%;font-size:10px;color:#9A7BA8;margin-top:4px;">এডমিন অনলি - পাবলিক দেখতে পাবে না</div>';
+          adminPanel.insertBefore(div, adminPanel.firstChild.nextSibling || adminPanel.firstChild);
+        }
+      }
+    } catch(e){}
+  }
+  setInterval(enforceAdminStats, 1000);
+  document.addEventListener('DOMContentLoaded', enforceAdminStats);
+})();
+</script>
 
 </body>
 </html>
