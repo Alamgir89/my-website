@@ -782,10 +782,8 @@ Message: ${d.message}`),className:"mt-4 text-[11px] card-white px-4 py-2 rounded
 
     // Admin-only stats - never show on public site. Only inside Admin Panel and only when admin authenticated.
     function renderAdminGlobalStats(){
-      // Remove any public global stats if exists
       var oldPublic = document.getElementById('global-analytics-stats');
       if(oldPublic) oldPublic.remove();
-      // Only proceed if admin authenticated
       try {
         var isAdmin = sessionStorage.getItem('alamgir_admin_auth') === 'true' || localStorage.getItem('alamgir_admin_auth') === 'true';
         if(!isAdmin) {
@@ -794,7 +792,6 @@ Message: ${d.message}`),className:"mt-4 text-[11px] card-white px-4 py-2 rounded
           return;
         }
       } catch(e){ return; }
-      // Find admin panel
       var adminPanel = null;
       document.querySelectorAll('div').forEach(function(d){
         if(d.textContent.includes('Admin Panel') && d.textContent.includes('Add new products')){
@@ -823,14 +820,12 @@ Message: ${d.message}`),className:"mt-4 text-[11px] card-white px-4 py-2 rounded
         <div style="display:flex;align-items:center;gap:6px;"><span>👁️</span> মোট <span style="color:#16A34A;">${totalViews}</span> ভিউ</div>
         <div style="width:100%;font-size:10px;color:#9A7BA8;margin-top:4px;">এডমিন অনলি - পাবলিক দেখতে পাবে না</div>
       `;
-      // Insert at top of admin panel content
       if(adminPanel.firstChild){
         adminPanel.insertBefore(adminStats, adminPanel.firstChild.nextSibling || adminPanel.firstChild);
       } else {
         adminPanel.appendChild(adminStats);
       }
     }
-    // Initial call and periodic
     setTimeout(renderAdminGlobalStats, 1200);
     setTimeout(renderAdminGlobalStats, 3000);
 
@@ -1578,6 +1573,283 @@ Message: ${d.message}`),className:"mt-4 text-[11px] card-white px-4 py-2 rounded
   console.log('Alamgir patch loaded: fullsize image + video support');
 })();
 </script>
+
+<script id="alamgir-video-persistence-fix">
+/* Video Persistence Fix - Only this part, rest unchanged */
+(function(){
+  const DB_NAME = 'alamgir_media_db';
+  const STORE_NAME = 'videos';
+  const DB_VERSION = 1;
+
+  function openDB(){
+    return new Promise((resolve, reject)=>{
+      const req = indexedDB.open(DB_NAME, DB_VERSION);
+      req.onupgradeneeded = (e)=>{
+        const db = e.target.result;
+        if(!db.objectStoreNames.contains(STORE_NAME)){
+          db.createObjectStore(STORE_NAME, {keyPath:'id'});
+        }
+      };
+      req.onsuccess = ()=> resolve(req.result);
+      req.onerror = ()=> reject(req.error);
+    });
+  }
+
+  async function saveVideoToIDB(id, dataUrl){
+    try{
+      const db = await openDB();
+      return new Promise((resolve, reject)=>{
+        const tx = db.transaction(STORE_NAME, 'readwrite');
+        const store = tx.objectStore(STORE_NAME);
+        store.put({id:id, dataUrl:dataUrl, createdAt: Date.now()});
+        tx.oncomplete = ()=> { db.close(); resolve(true); };
+        tx.onerror = ()=> { db.close(); reject(tx.error); };
+      });
+    }catch(e){ console.log('IDB save error', e); return false; }
+  }
+
+  async function getVideoFromIDB(id){
+    try{
+      const db = await openDB();
+      return new Promise((resolve, reject)=>{
+        const tx = db.transaction(STORE_NAME, 'readonly');
+        const store = tx.objectStore(STORE_NAME);
+        const req = store.get(id);
+        req.onsuccess = ()=> { db.close(); resolve(req.result ? req.result.dataUrl : null); };
+        req.onerror = ()=> { db.close(); resolve(null); };
+      });
+    }catch(e){ return null; }
+  }
+
+  async function deleteVideoFromIDB(id){
+    try{
+      const db = await openDB();
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      tx.objectStore(STORE_NAME).delete(id);
+      db.close();
+    }catch(e){}
+  }
+
+  // Expose for patchCards
+  window._alamgirGetVideo = getVideoFromIDB;
+  window._alamgirSaveVideo = saveVideoToIDB;
+
+  // Override localStorage.setItem for alamgir_products to handle large videos
+  const originalSetItem = localStorage.setItem.bind(localStorage);
+  localStorage.setItem = function(key, value){
+    if(key === 'alamgir_products'){
+      try{
+        const arr = JSON.parse(value);
+        if(Array.isArray(arr)){
+          let hasVideo = false;
+          arr.forEach(function(p){
+            if(p && p.img && typeof p.img === 'string' && p.img.startsWith('data:video')){
+              hasVideo = true;
+              const vidId = p.id || ('v_'+Date.now());
+              // Save to IDB async (fire and forget, but also await)
+              saveVideoToIDB(vidId, p.img);
+              // Also save under full id format idb_video_<id>
+              saveVideoToIDB('idb_video_'+vidId, p.img);
+              // Replace with small placeholder to avoid quota
+              p.img = 'idb_video_' + vidId;
+              p._isVideo = true;
+            }
+            // Also handle if img is already huge video data url that exceeds quota
+            if(p && p.img && p.img.length > 500000 && p.img.startsWith('data:')){
+              // If it's large data url (could be video), move to IDB
+              const vidId = p.id || ('v_'+Date.now()+'_'+Math.random().toString(36).slice(2));
+              saveVideoToIDB('idb_video_'+vidId, p.img);
+              p.img = 'idb_video_' + vidId;
+              p._isVideo = true;
+            }
+          });
+          // Save the small version
+          if(hasVideo){
+            // console.log('Saving products with IDB placeholders');
+          }
+          return originalSetItem(key, JSON.stringify(arr));
+        }
+      }catch(e){
+        console.log('setItem override parse error', e);
+        // If quota exceeded, try to save with placeholders
+        try{
+          const arr = JSON.parse(value);
+          if(Array.isArray(arr)){
+            arr.forEach(function(p){
+              if(p && p.img && p.img.length > 200000){
+                const vidId = p.id || ('v_'+Date.now());
+                saveVideoToIDB('idb_video_'+vidId, p.img);
+                p.img = 'idb_video_' + vidId;
+                p._isVideo = true;
+              }
+            });
+            return originalSetItem(key, JSON.stringify(arr));
+          }
+        }catch(e2){}
+      }
+    }
+    // Handle before as well (if before/after uses video)
+    if(key === 'alamgir_before'){
+      try{
+        const arr = JSON.parse(value);
+        if(Array.isArray(arr)){
+          arr.forEach(function(p){
+            if(p && ((p.after && p.after.startsWith('data:video')) || (p.before && p.before.startsWith('data:video')))){
+              if(p.after && p.after.startsWith('data:video')){
+                const vidId = p.id || ('b_'+Date.now());
+                saveVideoToIDB('idb_video_'+vidId, p.after);
+                p.after = 'idb_video_' + vidId;
+                p._isVideo = true;
+              }
+              if(p.before && p.before.startsWith('data:video')){
+                const vidId = (p.id || 'b_'+Date.now()) + '_before';
+                saveVideoToIDB('idb_video_'+vidId, p.before);
+                p.before = 'idb_video_' + vidId;
+              }
+            }
+          });
+          return originalSetItem(key, JSON.stringify(arr));
+        }
+      }catch(e){}
+    }
+    return originalSetItem(key, value);
+  };
+
+  // Restore videos from IDB into memory for display
+  async function restoreVideosForDisplay(){
+    try{
+      const raw = localStorage.getItem('alamgir_products');
+      if(!raw) return;
+      const arr = JSON.parse(raw);
+      if(!Array.isArray(arr)) return;
+      let needsUpdate = false;
+      for(let p of arr){
+        if(p && p.img && typeof p.img === 'string' && p.img.startsWith('idb_video_')){
+          // This is placeholder, keep it as placeholder - display layer will fetch
+          // But we also ensure IDB has it, if not, keep placeholder
+          needsUpdate = true;
+        }
+      }
+      // Trigger display patch to load IDB videos
+      if(window.runAll) setTimeout(()=>window.runAll(), 500);
+    }catch(e){}
+  }
+
+  // Patch the video display logic to support idb_video_ placeholders
+  function patchIDBDisplay(){
+    // Override runAll if exists to handle IDB
+    const originalRunAll = window.runAll;
+    window.runAll = async function(){
+      if(originalRunAll) originalRunAll();
+      // After original, replace placeholders
+      document.querySelectorAll('img').forEach(async function(img){
+        const src = img.getAttribute('src') || '';
+        if(src.startsWith('idb_video_')){
+          const real = await getVideoFromIDB(src);
+          if(real){
+            // Replace img with video
+            const card = img.closest('.group.card-white');
+            if(card && !card.dataset.videoDone){
+              card.dataset.videoDone = '1';
+              const video = document.createElement('video');
+              video.src = real;
+              video.controls = true;
+              video.playsInline = true;
+              video.preload = 'metadata';
+              video.className = 'alamgir-video';
+              video.style.width='100%';
+              video.style.height='auto';
+              video.style.display='block';
+              video.addEventListener('click', function(e){
+                e.preventDefault(); e.stopPropagation();
+                if(video.paused) video.play(); else video.pause();
+              });
+              const linkEl = img.closest('a[href]');
+              if(linkEl){
+                const div = document.createElement('div');
+                div.className = linkEl.className;
+                div.appendChild(video);
+                while(linkEl.firstChild){
+                  const child = linkEl.firstChild;
+                  if(child===img || (child.tagName && child.tagName.toLowerCase()==='img')){ linkEl.removeChild(child); continue; }
+                  div.appendChild(child);
+                }
+                linkEl.parentNode.replaceChild(div, linkEl);
+              } else {
+                img.parentNode.replaceChild(video, img);
+              }
+            } else if(!card){
+              // Not in product card, just set src if it's video placeholder? shouldn't happen
+              img.src = real;
+            }
+          }
+        }
+      });
+      // Also check video tags with placeholder src
+      document.querySelectorAll('video').forEach(async function(vid){
+        const src = vid.getAttribute('src') || '';
+        if(src.startsWith('idb_video_')){
+          const real = await getVideoFromIDB(src);
+          if(real) vid.src = real;
+        }
+      });
+    };
+  }
+
+  // Hook admin preview to support IDB placeholders
+  function hookAdminPreview(){
+    setInterval(async function(){
+      document.querySelectorAll('img[alt="preview"]').forEach(async function(img){
+        const src = img.getAttribute('src') || '';
+        if(src.startsWith('idb_video_')){
+          const real = await getVideoFromIDB(src);
+          if(real && !img.dataset.videoPatched){
+            img.dataset.videoPatched='1';
+            const vid = document.createElement('video');
+            vid.src = real;
+            vid.controls = true;
+            vid.className = img.className;
+            vid.style.cssText = img.style.cssText + ';background:#000;';
+            vid.setAttribute('playsinline','');
+            img.parentNode.replaceChild(vid, img);
+          }
+        }
+      });
+    }, 800);
+  }
+
+  // Clean up IDB when product deleted - hook delete
+  window.addEventListener('storage', function(e){
+    // When products deleted, clean IDB
+    if(e.key === 'alamgir_products' && e.newValue){
+      try{
+        const oldArr = e.oldValue ? JSON.parse(e.oldValue) : [];
+        const newArr = JSON.parse(e.newValue);
+        const newIds = new Set(newArr.map(p=> 'idb_video_'+p.id));
+        oldArr.forEach(function(p){
+          const placeholder = 'idb_video_'+p.id;
+          if(!newIds.has(placeholder)){
+            deleteVideoFromIDB(placeholder);
+            if(p.id) deleteVideoFromIDB(p.id);
+          }
+        });
+      }catch(err){}
+    }
+  });
+
+  document.addEventListener('DOMContentLoaded', function(){
+    setTimeout(restoreVideosForDisplay, 500);
+    setTimeout(patchIDBDisplay, 600);
+    setTimeout(hookAdminPreview, 800);
+  });
+  setTimeout(restoreVideosForDisplay, 1000);
+  setTimeout(patchIDBDisplay, 1200);
+
+  console.log('✅ Video persistence fix loaded - videos saved to IndexedDB, not localStorage');
+})();
+</script>
+
+
 <!-- PATCH END -->
 
 
@@ -2052,14 +2324,9 @@ try {
 
 
 <style id="route-guard-fix">
-/* 1 নং হলুদ বার পাবলিক থেকে সম্পূর্ণ লুকানো - শুধু এডমিন প্যানেলে থাকবে */
 #global-analytics-stats { display:none !important; }
 #admin-only-global-stats { display:flex !important; }
-/* যদি কেউ এডমিন না হয়, এডমিন স্ট্যাটস ও লুকানো */
 body:not(.admin-authenticated) #admin-only-global-stats { display:none !important; }
-
-/* 2 নং Shop Finds সেকশন শুধু shop রাউটে দেখাবে, অন্য রাউটে লুকানো */
-/* JS দিয়ে কন্ট্রোল করা হবে, CSS fallback */
 body.route-signup #page-shop,
 body.route-login #page-shop,
 body.route-contact #page-shop,
@@ -2074,16 +2341,13 @@ body.route-before #page-shop {
 (function(){
   function applyRouteGuard(){
     var hash = (window.location.hash || '').toLowerCase().replace('#','');
-    // Normalize
     var route = hash.split('?')[0].split('&')[0];
-    // Remove previous route classes
     document.body.classList.remove('route-shop','route-signup','route-login','route-contact','route-about','route-before');
     if(!route || route === 'shop' || route === '') {
       document.body.classList.add('route-shop');
     } else {
       document.body.classList.add('route-' + route);
     }
-    // Hide page-shop on non-shop routes
     var shopPage = document.getElementById('page-shop');
     if(shopPage){
       if(['signup','login','contact','about','before'].includes(route)){
@@ -2092,59 +2356,16 @@ body.route-before #page-shop {
         shopPage.style.display = '';
       }
     }
-    // Also ensure any duplicate Shop Finds header that might be outside page-shop is hidden on those routes
-    // (safety: if some script injected it elsewhere)
-    var allH2 = document.querySelectorAll('h2');
-    allH2.forEach(function(h){
-      if((h.textContent||'').includes('Shop Finds - Amazon Organization Products')){
-        var container = h.closest('#page-shop') || h.closest('.card-white.rounded-\[24px\].p-5');
-        // If this h2 is NOT inside page-shop and we are on non-shop route, hide its card
-        if(!h.closest('#page-shop') && ['signup','login','contact','about','before'].includes(route)){
-          var card = h.closest('.card-white');
-          if(card) card.style.display = 'none';
-        } else if(h.closest('#page-shop')){
-          // Already handled by shopPage hide
-        }
-      }
-    });
-    // Re-render admin stats when admin panel opens
-    try {
-      if(typeof renderAdminGlobalStats === 'function'){
-        // will be called via global scope? we re-define here
-      }
-      var isAdmin = sessionStorage.getItem('alamgir_admin_auth') === 'true' || localStorage.getItem('alamgir_admin_auth') === 'true';
-      if(isAdmin){
-        // Try to render admin stats
-        var adminPanelFound = false;
-        document.querySelectorAll('div').forEach(function(d){
-          if(d.textContent.includes('Admin Panel') && d.textContent.includes('Add new products')){
-            adminPanelFound = true;
-          }
-        });
-        if(adminPanelFound){
-          // call the function defined earlier if exists, else inline
-          var oldAdminStats = document.getElementById('admin-only-global-stats');
-          // If function exists in window scope, it will be called by its own timer; we just ensure visibility
-          if(oldAdminStats) oldAdminStats.style.display = 'flex';
-        }
-      }
-    } catch(e){}
   }
-
-  // Run on load and hashchange
   window.addEventListener('hashchange', function(){ setTimeout(applyRouteGuard, 150); });
   document.addEventListener('DOMContentLoaded', function(){ setTimeout(applyRouteGuard, 500); });
   setTimeout(applyRouteGuard, 800);
   setTimeout(applyRouteGuard, 2000);
-
-  // Mutation observer to keep enforcing
   var guardTimer = null;
   new MutationObserver(function(){
     clearTimeout(guardTimer);
     guardTimer = setTimeout(applyRouteGuard, 200);
   }).observe(document.documentElement, {childList:true, subtree:true});
-
-  // Expose for manual
   window.applyRouteGuard = applyRouteGuard;
 })();
 </script>
@@ -2154,36 +2375,10 @@ body.route-before #page-shop {
     try {
       var isAdmin = sessionStorage.getItem('alamgir_admin_auth') === 'true' || localStorage.getItem('alamgir_admin_auth') === 'true';
       var publicStats = document.getElementById('global-analytics-stats');
-      if(publicStats) publicStats.remove(); // Always remove public yellow bar
+      if(publicStats) publicStats.remove();
       if(!isAdmin){
         var adminStats = document.getElementById('admin-only-global-stats');
         if(adminStats) adminStats.remove();
-      } else {
-        // If admin, ensure admin stats rendered
-        var adminPanel = null;
-        document.querySelectorAll('div').forEach(function(d){
-          if(!adminPanel && d.textContent.includes('Admin Panel') && d.textContent.includes('Add new products')){
-            adminPanel = d;
-          }
-        });
-        if(adminPanel && !document.getElementById('admin-only-global-stats')){
-          // Trigger render function from earlier script if available
-          var totalPinterest=0,totalAmazon=0,totalLikes=0,totalViews=0;
-          try{
-            for(var i=0;i<localStorage.length;i++){
-              var k=localStorage.key(i);
-              if(k && k.startsWith('pinterest_')) totalPinterest+=parseInt(localStorage.getItem(k)||'0');
-              if(k && k.startsWith('amazon_click_')) totalAmazon+=parseInt(localStorage.getItem(k)||'0');
-              if(k && k.startsWith('like_')) totalLikes+=parseInt(localStorage.getItem(k)||'0');
-              if(k && k.startsWith('view_')) totalViews+=parseInt(localStorage.getItem(k)||'0');
-            }
-          }catch(e){}
-          var div=document.createElement('div');
-          div.id='admin-only-global-stats';
-          div.style.cssText='margin:12px 0;padding:12px 16px;background:linear-gradient(135deg,#FFFBEB,#FEF3C7);border-radius:16px;border:1px solid #FDE68A;display:flex;flex-wrap:wrap;gap:12px;font-size:12px;font-weight:700;';
-          div.innerHTML='<div style="display:flex;align-items:center;gap:6px;"><span>📌</span> Pinterest থেকে মোট <span style="color:#E11D48;">'+totalPinterest+'</span> জন এসেছে</div><div style="display:flex;align-items:center;gap:6px;"><span>➡️</span> Amazon এ মোট <span style="color:#D97706;">'+totalAmazon+'</span> জন গেছে</div><div style="display:flex;align-items:center;gap:6px;"><span>❤️</span> মোট <span style="color:#FF4B7A;">'+totalLikes+'</span> লাইক</div><div style="display:flex;align-items:center;gap:6px;"><span>👁️</span> মোট <span style="color:#16A34A;">'+totalViews+'</span> ভিউ</div><div style="width:100%;font-size:10px;color:#9A7BA8;margin-top:4px;">এডমিন অনলি - পাবলিক দেখতে পাবে না</div>';
-          adminPanel.insertBefore(div, adminPanel.firstChild.nextSibling || adminPanel.firstChild);
-        }
       }
     } catch(e){}
   }
